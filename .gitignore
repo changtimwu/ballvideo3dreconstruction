@@ -1,0 +1,6 @@
+# Large media
+*.mp4
+*.mov
+
+# OS
+.DS_Store
