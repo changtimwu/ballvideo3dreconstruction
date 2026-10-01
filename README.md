@@ -10,8 +10,9 @@ the video's clock.
 - `prompts.md`: the original spec.
 
 > **Status (milestone 1 of [#1](https://github.com/changtimwu/ballvideo3dreconstruction/issues/1)):**
-> `tracking_data.json` now holds **real player floor positions** for the whole match. The
-> ball isn't tracked yet, and body poses are still procedural. Without
+> `tracking_data.json` holds **real player floor positions** for the whole match.
+> Milestone 2 (2D ball track in the video) is done, but its output isn't in the viewer yet:
+> that needs the 3D ball from milestone 3. Body poses are still procedural. Without
 > `tracking_data.json`, the viewer falls back to a generated demo dataset. The badge in the
 > top-right corner shows which data is loaded.
 
@@ -125,6 +126,8 @@ uv run python -m tracking.detect match.mp4            # stage 2: YOLO pose, ~40 
 uv run python -m tracking.appearance match.mp4        # stage 2b: hair/torso/shorts/elbow colours, ~2 min
 uv run python -m tracking.track                       # stage 3: identities + smoothed floor tracks
 uv run python -m tracking.export                      # → tracking_data.json
+uv run python -m tracking.ball_detect match.mp4       # ball B1: colour+motion candidates, 60 fps, ~5 min
+uv run python -m tracking.ball_track                  # ball B2: link into 2D flight tracks → data/ball2d.npz
 uv run python -m tracking.overlay match.mp4 --start 290 --end 320   # QA video → data/overlay.mp4
 ```
 
@@ -139,6 +142,9 @@ files go to `data/` (gitignored).
 | `track` | See below. |
 | `export` | Pairs players into teams (the pair that shares a half), names them by shirt colour, and writes the viewer JSON. Long gaps stay `null`, and the viewer hides the player there. |
 | `overlay` | Draws the exported positions back onto the video, to check alignment and identities. |
+| `ball_detect` | Every frame: neon-green colour mask, minus a learned static mask (net-post sticker, logos), keeping only moving blobs. Records size, shape, hue/saturation and distance to the nearest ankle. |
+| `ball_track` | Links candidates into flight tracks (seed by consistent velocity, extend with a quadratic prediction, allow short occlusion gaps). Keeps tracks that are ball-coloured (hue ≥ 40, sat ≥ 165; this rejects shoe stripes and a paddle grip), moving, and whose size-implied depth puts them over this court (rejects neighbouring-court balls). Then picks one track per frame. |
+| `ball_qa` | Crops around random tracked ball positions, to check precision. |
 | `identity_frames` | Tiles frames with per-tracker boxes at chosen timestamps. This is the check that catches identity swaps. |
 
 **How `track` assigns identities:**
@@ -162,6 +168,14 @@ Checked by eye at 12 timestamps across the match: identities are correct in all 
 including after the end switch. 61% of frames have all four players. The rest are mostly
 players outside the camera's view, which stay `null`.
 
+**2D ball result:**
+- **Coverage:** the ball is tracked in 58% of all frames, 54% directly observed and the
+  rest interpolated across short gaps. The median flight track is 26 observations.
+- **Precision:** checked by eye on 42 random crops, 41 are the ball; the other is an
+  interpolated point behind a player's head.
+- **What the untracked frames are:** in sampled frames without a track, the ball was out
+  of play (between points, in a hand, or lying still).
+
 **Video quirks the pipeline handles:**
 - **A full-screen ad at ~312.5–316.4 s** ("Wear Eye Protection!"). It is detected by
   checking whether the court lines are where the camera says they should be. Players are
@@ -169,6 +183,8 @@ players outside the camera's view, which stay `null`.
 - **The teams switch ends between 7:30 and 10:20.** Identity comes from shirt colour, not
   court side.
 - **Near players often step out of the bottom/left edge of the frame.** These become gaps.
+- **An animated graphic ball flies at the camera just before the ad** (~310.9–311.5 s).
+  It's correctly not tracked.
 
 ### Camera
 

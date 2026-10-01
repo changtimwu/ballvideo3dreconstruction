@@ -4,11 +4,13 @@
 
 Each player gets a 0.45 m floor circle at the exported position (projected
 through the calibrated camera), tagged P0..P3 in tracking_data.json order; raw per-frame estimates are
-small dots. Court lines are drawn too, so a camera bump would show.
+small dots. Court lines are drawn too, so a camera bump would show. The 2D
+ball track (ball_track) is a yellow ring, magenta where interpolated.
 """
 import argparse
 import json
 import subprocess
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -35,6 +37,7 @@ def main():
     ap.add_argument("--data", default="tracking_data.json")
     ap.add_argument("--out", default="data/overlay.mp4")
     ap.add_argument("--scale", type=float, default=0.5)
+    ap.add_argument("--ball", default="data/ball2d.npz", help="2D ball track to draw, if present")
     a = ap.parse_args()
 
     cam = Camera.load()
@@ -52,6 +55,7 @@ def main():
                            "-r", str(fps), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", a.out],
                           stdin=subprocess.PIPE)
     raw_t = P["t"]; raw = P["raw"]
+    ball = np.load(a.ball) if Path(a.ball).exists() else None
     while True:
         fi = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES)))
         t = fi / fps
@@ -76,6 +80,12 @@ def main():
             c = tuple(cam.project(np.array([[x, y, 0]]))[0].astype(int) + [-20, 40])
             cv2.putText(img, f"P{k}", c, cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 0, 0), 7, cv2.LINE_AA)
             cv2.putText(img, f"P{k}", c, cv2.FONT_HERSHEY_SIMPLEX, 1.1, col, 3, cv2.LINE_AA)
+        if ball is not None:
+            k = fi - int(ball["f0"])
+            if 0 <= k < len(ball["xy"]) and np.isfinite(ball["xy"][k, 0]):
+                bx, by = ball["xy"][k].astype(int)
+                cv2.circle(img, (bx, by), 14, (0, 0, 0), 5, cv2.LINE_AA)
+                cv2.circle(img, (bx, by), 14, (0, 255, 255) if ball["observed"][k] else (255, 0, 255), 2, cv2.LINE_AA)
         cv2.putText(img, f"{t:7.2f}s", (cam.size[0] - 260, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
         ff.stdin.write(cv2.resize(img, (W, H)).tobytes())
     ff.stdin.close(); ff.wait()

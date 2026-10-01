@@ -77,3 +77,8 @@ format. The original spec is in `prompts.md`.
 - **Verify identities by eye** with `tracking.identity_frames` (per-tracker boxes) at ~12 timestamps
   (including after the end switch). The tracker's own statistics looked fine while
   identities were wrong.
+- **The ball in 2D** (`ball_detect` / `ball_track`): colour separates it best. Ball hue
+  43–50 / sat > 190; yellow shoe stripes hue 34–37; the red player's paddle grip sat < 140.
+  Don't reject candidates by distance to ankles, because low balls bounce right by
+  players' feet. Check precision with `tracking.ball_qa` crops and recall by looking at
+  frames with no track.
