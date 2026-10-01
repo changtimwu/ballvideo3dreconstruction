@@ -1,0 +1,24 @@
+{
+  "id": "cRRLvhKbPXM",
+  "url": "https://www.youtube.com/watch?v=cRRLvhKbPXM",
+  "title": "Advanced Senior Pickleball in Orlando",
+  "channel": "The Pickleball Pirates",
+  "duration": 935,
+  "upload_date": "20260929",
+  "video_fps": 60,
+  "analysed_at": "2026-10-01T07:36:15+00:00",
+  "pipeline": "9df6c20",
+  "players": [
+    "灰衣",
+    "白衣",
+    "藍衣",
+    "紅衣"
+  ],
+  "stats": {
+    "frames": 28025,
+    "players_all_visible": 0.576,
+    "ball_visible": 0.504,
+    "hits": 438,
+    "bounces": 270
+  }
+}

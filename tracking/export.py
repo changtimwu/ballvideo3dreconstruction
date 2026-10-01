@@ -25,6 +25,7 @@ def display_colour(lab) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", required=True, help="camera.json from tracking.calibrate")
     ap.add_argument("--players", default="data/players.npz")
     ap.add_argument("--ball3d", default="data/ball3d.npz")
     ap.add_argument("--out", default="tracking_data.json")
@@ -93,7 +94,7 @@ def main():
         b = None if not np.isfinite(ball[fi, 0]) else [round(float(v), 3) for v in ball[fi]]
         frames.append({"t": round(float(t[fi]), 4), "players": row, "ball": b})
 
-    cam = Camera.load().to_json()
+    cam = Camera.load(a.camera).to_json()
     data = {
         "fps": round(float(P["fps"]) / int(P["step"]), 3),
         "video_offset": 0.0,

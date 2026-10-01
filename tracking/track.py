@@ -436,12 +436,13 @@ def weighted_kmeans(X, w, k, iters=50, seed=0):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", required=True, help="camera.json from tracking.calibrate")
     ap.add_argument("--det", default="data/detections.npz")
     ap.add_argument("--app", default=None, help="appearance.npz (default: next to --det)")
     ap.add_argument("--out", default="data/players.npz")
     a = ap.parse_args()
 
-    cam = Camera.load()
+    cam = Camera.load(a.camera)
     D = np.load(a.det)
     fps, step = float(D["fps"]), int(D["step"])
     order = np.argsort(D["frames"])

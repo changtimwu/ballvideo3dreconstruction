@@ -56,21 +56,24 @@ def torso_colour(img_lab: np.ndarray, box: np.ndarray, kp: np.ndarray) -> np.nda
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", required=True, help="camera.json from tracking.calibrate")
     ap.add_argument("video")
     ap.add_argument("--start", type=float, default=0)
     ap.add_argument("--end", type=float, default=None)
-    ap.add_argument("--step", type=int, default=2, help="process every Nth frame (2 → ~30 fps)")
+    ap.add_argument("--step", type=int, default=0, help="process every Nth frame (default: ~30 fps)")
     ap.add_argument("--model", default="yolo11m-pose.pt")
     ap.add_argument("--imgsz", type=int, default=1280)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--out", default="data/detections.npz")
     a = ap.parse_args()
 
-    cam = Camera.load()
+    cam = Camera.load(a.camera)
     model = YOLO(a.model)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     cap = cv2.VideoCapture(a.video)
     fps = cap.get(cv2.CAP_PROP_FPS)
+    if a.step <= 0:
+        a.step = max(1, round(fps / 30))
     n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     f0 = int(round(a.start * fps))
     f1 = min(n_total, int(round(a.end * fps)) if a.end else n_total)

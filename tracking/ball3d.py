@@ -255,12 +255,13 @@ def refit_chain(cam, segs, seg_obs, ch, w_join=0.05, w_floor=0.03, eps=1e-4):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", required=True, help="camera.json from tracking.calibrate")
     ap.add_argument("--ball", default="data/ball2d.npz")
     ap.add_argument("--players", default="data/players.npz")
     ap.add_argument("--out", default="data/ball3d.npz")
     a = ap.parse_args()
 
-    cam = Camera.load()
+    cam = Camera.load(a.camera)
     B = np.load(a.ball)
     fps, f0 = float(B["fps"]), int(B["f0"])
     raw, tid, area = B["raw"], B["track"], B["area"]

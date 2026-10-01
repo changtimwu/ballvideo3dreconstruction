@@ -1,81 +1,95 @@
 # 匹克球 3D 重建 · Pickleball 3D Reconstruction
 
-An interactive 3D playback viewer for a pickleball doubles match. It plays a Three.js
-reconstruction of the court, the players and the ball next to the source video, locked to
-the video's clock.
+Turn a YouTube pickleball doubles video into 3D: player positions, the ball's flight,
+hits and bounces. Then replay it in an interactive Three.js court, side by side with the
+original video.
 
-- `index.html`: the whole viewer in one file (Three.js and Tailwind come from CDNs).
-- `tracking/`: the Python pipeline that extracts tracking from the video (§4).
-- `tracking_data.json`: its output, which the viewer loads.
-- `prompts.md`: the original spec.
+**Site:** https://changtimwu.github.io/ballvideo3dreconstruction/
 
-> **Status (milestone 1 of [#1](https://github.com/changtimwu/ballvideo3dreconstruction/issues/1)):**
-> `tracking_data.json` holds **real player floor positions, the 3D ball, and hit/bounce
-> events** for the whole match (milestones 1–3). Body poses are still procedural
-> (milestone 4). Without
-> `tracking_data.json`, the viewer falls back to a generated demo dataset. The badge in the
-> top-right corner shows which data is loaded.
+## How it fits together
 
-## 1. Get the match video (`match.mp4`)
+```
+your Mac                                     GitHub
+─────────────────────────────────            ───────────────────────────────────────
+python -m tracking analyze <youtube-url>     push → Actions (.github/workflows/pages.yml)
+  download (yt-dlp) → work/<id>/               tools/build_site.py
+  calibrate → detect → … → ball3d               site/*  +  videos/*/  →  _site/
+  → videos/<id>/tracking_data.json              writes videos.json (the video list)
+  → git commit + push ───────────────────────►  deploy to GitHub Pages
 
-The video is ~365 MB and isn't in git (`*.mp4` is in `.gitignore`), so download it again
-from YouTube:
-
-- **Source:** "Advanced Senior Pickleball in Orlando": https://www.youtube.com/watch?v=cRRLvhKbPXM
-- **Length:** 935 s (15:35)
-
-**Requirements:** [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and `ffmpeg` (needed to merge
-the separate video and audio streams).
-
-```bash
-brew install yt-dlp ffmpeg        # macOS; or: pipx install yt-dlp
+browser: index.html (video list) ─► viewer.html?v=<id>
+         3D reconstruction  ⇄  YouTube player (the master clock)
 ```
 
-**Download.** Run this from the repository root:
+- **Analysis runs locally.** It takes ~45 min per 15-min video on an M1 Max GPU, and
+  only its results are committed. The videos themselves aren't: they stay in `work/`
+  (gitignored), and the site plays them from YouTube.
+- **CI only assembles the static site.** It copies the pages, publishes each video's
+  data as `data/<id>.json`, and generates `videos.json` from the `meta.json` files.
+
+| Path | What it is |
+| --- | --- |
+| `tracking/` | The analysis pipeline and CLI (§2, §5). |
+| `videos/<id>/` | Per analysed video: `tracking_data.json`, `camera.json`, `meta.json`. Committed. |
+| `site/index.html` | The video list. Cards link to the viewer. |
+| `site/viewer.html` | The 3D viewer plus the YouTube player. One file; Three.js and Tailwind come from CDNs. |
+| `tools/build_site.py` | Builds `_site/` and `videos.json` (CI; standard library only). |
+| `prompts.md` | The original viewer spec. |
+
+## 1. Setup
 
 ```bash
-yt-dlp -f "299+140" --merge-output-format mp4 -o match.mp4 \
-  "https://www.youtube.com/watch?v=cRRLvhKbPXM"
+brew install yt-dlp ffmpeg uv     # yt-dlp downloads; ffmpeg merges video and audio
+uv sync                           # Python 3.12 + PyTorch/Ultralytics (~1 GB on first run)
 ```
 
-- `299` = 1920×1080, 60 fps, H.264 video only
-- `140` = AAC 129 kbps audio only
-- The output must be named `match.mp4` and sit next to `index.html`.
-
-**Check.** You should see `h264 1920x1080 60000/1001`, `aac`, and a duration of about `935.16`:
+## 2. Analyse a video
 
 ```bash
-ffprobe -v error -show_entries format=duration:stream=codec_name,width,height,r_frame_rate \
-  -of compact match.mp4
+uv run python -m tracking analyze "https://www.youtube.com/watch?v=cRRLvhKbPXM"
 ```
 
-**Why these exact formats:**
-- **Use H.264 (`299`).** Don't swap in the smaller VP9/AV1 streams (`303`/`398`). They play in
-  Chrome, but the camera calibration and frame stepping assume this exact 1080p60 encode.
-- **Use `-f "299+140"`, not `-f best`.** `best` picks a ≤720p file that already contains
-  audio, and the calibration is in 1080p pixel space.
-- **If YouTube renumbers its formats,** list them with `yt-dlp -F <url>` and pick the 1080p60
-  `avc1` video plus the `m4a` audio.
+**What the command does:**
+1. Reads the video's metadata and downloads it to `work/<id>/video.mp4`: H.264 up to
+   1080p, plus AAC audio.
+2. Runs the stages in §5. Any stage whose output already exists is skipped, so a rerun
+   resumes where it stopped; `--force` reruns everything.
+3. Writes `videos/<id>/` (`tracking_data.json`, `camera.json`, `meta.json` with the
+   title, channel, duration and tracking stats).
+4. Commits that folder and pushes. CI then republishes the site, and the video appears
+   in the list.
 
-## 2. Run the viewer
+**Options:**
+- `--no-push`: commit but don't push.
+- `--no-commit`: just write the files.
+- `--no-gui`: never open the calibration window; fail instead.
 
-Open `index.html` in Chrome. That's enough for the video and the demo data.
+**Court calibration** is automatic. It finds the court lines on a median "empty court"
+frame. If that doesn't validate, a window opens on that frame: click the named court
+points it asks for (`s` skips a point that isn't visible, `u` undoes, Enter finishes once
+4 or more are picked).
 
-**Hosted version:** https://changtimwu.github.io/ballvideo3dreconstruction/
+**What footage works:**
+- A **fixed camera** that sees the court, typically from behind a baseline. Videos with
+  camera cuts or panning aren't supported; the calibration's drift check warns about them.
+- **Doubles** (4 players).
+- A **yellow/green ball.**
 
-The 365 MB video can't go on GitHub Pages, which caps files at 100 MB. After downloading
-`match.mp4` (§1), click **載入影片** in the video panel, or drag the file onto the page. The
-file stays on your machine; nothing is uploaded.
+## 3. The site
 
-To have `tracking_data.json` picked up automatically, serve the folder over HTTP. Chrome
-blocks `fetch()` from `file://`. The server must support HTTP Range requests, or video
-seeking won't work, so don't use `python3 -m http.server`.
+- **`index.html`** lists the analysed videos.
+- **`viewer.html?v=<id>`** plays one video: the 3D reconstruction next to the YouTube
+  player.
+
+The transport bar drives the YouTube player (play/pause, seek, frame step, ¼×/½×/1×),
+and the 3D scene follows the player's clock. 對照影片 shrinks the video to a mini player:
+YouTube players have to stay at least 200×200 px to keep playing.
+
+**Local preview** (no Range-capable server needed, since the video comes from YouTube):
 
 ```bash
-npx http-server -p 8080 .         # then open http://localhost:8080
+python3 tools/build_site.py && python3 -m http.server -d _site 8080
 ```
-
-You can also click **載入 JSON**, or drag a `.json` file onto the page.
 
 ### Controls
 
@@ -90,11 +104,11 @@ You can also click **載入 JSON**, or drag a `.json` file onto the page.
 | Drag / scroll | Orbit / zoom (dragging from any preset switches to 環繞) |
 
 **Deep links** set the starting view, e.g.
-`index.html#cam=broadcast&t=900&panel=0&trails=0`.
+`viewer.html?v=cRRLvhKbPXM#cam=broadcast&t=900&panel=0&trails=0`.
 
-## 3. Tracking data format (`tracking_data.json`)
+## 4. Tracking data format (`tracking_data.json`)
 
-The full schema is in the comment at the top of `index.html`. In short:
+In short:
 
 - **Units:** metres.
 - **Court coordinates:**
@@ -114,33 +128,15 @@ The full schema is in the comment at the top of `index.html`. In short:
   switch ends mid-match.
 - **`video_offset`:** maps data time to video time (`video_time = t + video_offset`).
 
-## 4. Tracking pipeline (`tracking/`)
+## 5. Pipeline stages (`tracking/`)
 
-Python 3.12 via `uv`; it uses PyTorch on Apple-silicon GPUs (MPS) when available. The
-first `uv sync` downloads ~1 GB.
-
-```bash
-uv sync
-uv run python -m tracking.check_camera match.mp4      # stage 1: camera check → tracking/camera.json
-uv run python -m tracking.detect match.mp4            # stage 2: YOLO pose, ~40 min for the full video
-uv run python -m tracking.appearance match.mp4        # stage 2b: hair/torso/shorts/elbow colours, ~2 min
-uv run python -m tracking.track                       # stage 3: identities + smoothed floor tracks
-uv run python -m tracking.export                      # → tracking_data.json
-uv run python -m tracking.ball_detect match.mp4       # ball B1: colour+motion candidates, 60 fps, ~5 min
-uv run python -m tracking.ball_track                  # ball B2: link into 2D flight tracks → data/ball2d.npz
-uv run python -m tracking.ball3d                      # ball B3: 3D flight fits + hits/bounces, ~2 min
-uv run python -m tracking.export                      # re-run to include the ball and events
-uv run python -m tracking.ball_check                  # physical sanity numbers for the 3D ball
-uv run python -m tracking.overlay match.mp4 --start 290 --end 320   # QA video → data/overlay.mp4
-```
-
-`detect` accepts `--start` / `--end` (seconds) to process a test window. Intermediate
-files go to `data/` (gitignored).
+`tracking analyze` runs these with per-video paths in `work/<id>/`. Each stage is also a
+module you can run on its own (`uv run python -m tracking.<stage> --help`).
 
 | Stage | What it does |
 | --- | --- |
-| `camera.py` / `check_camera` | Fits the near-half court lines, intersects them into corners, and runs `solvePnP` over a focal-length sweep. Re-checks every 30 s. The camera holds still to ~2 px for the whole video. |
-| `detect` | Runs YOLO11-pose on every 2nd frame (~30 fps). Keeps people whose feet project onto this court (±2 m), samples each one's shirt colour, and scores whether the court is visible in the frame. |
+| `calibrate` | Builds an empty-court median frame, detects line candidates (white top-hat mask, Hough lines, two direction families), and scores every line-pair × line-pair × court-labelling homography by whether the projected court model lands on paint with floor either side of it. The best one is turned into a camera (`solvePnP` with a focal-length sweep), snapped to the actual lines (near-half points first; far ones only where they agree), validated, and drift-checked every 30 s. Falls back to clicking court points. On the reference video it matches the hand calibration within 2 cm and 0.2°. |
+| `detect` | Runs YOLO11-pose at ~30 fps (every 2nd frame of a 60 fps video). Keeps people whose feet project onto this court (±2 m), samples each one's shirt colour, and scores whether the court is visible in the frame. |
 | `appearance` | Samples the median colour of keypoint-anchored regions per detection: hair, torso, shorts and each elbow. Needed because the near pair wear near-identical light shirts. |
 | `track` | See below. |
 | `export` | Pairs players into teams (the pair that shares a half), names them by shirt colour, and writes the viewer JSON. Long gaps stay `null`, and the viewer hides the player there. |
@@ -201,11 +197,4 @@ players outside the camera's view, which stay `null`.
 - **An animated graphic ball flies at the camera just before the ad** (~310.9–311.5 s).
   It's correctly not tracked.
 
-### Camera
-
-Current solution, used as `CALIBRATED_CAMERA` in `index.html` and stored in
-`tracking/camera.json`:
-
-- position `(-8.81, -4.78, 2.19)` m
-- vertical FOV `41.4°`
-- about 2 px reprojection error; the far court and net posts land within ~12 px.
+The numbers above are for the reference video (cRRLvhKbPXM).

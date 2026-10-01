@@ -30,6 +30,7 @@ def floor_circle(cam, x, y, r=0.45, n=40):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", required=True, help="camera.json from tracking.calibrate")
     ap.add_argument("video")
     ap.add_argument("--start", type=float, required=True)
     ap.add_argument("--end", type=float, required=True)
@@ -40,7 +41,7 @@ def main():
     ap.add_argument("--ball", default="data/ball2d.npz", help="2D ball track to draw, if present")
     a = ap.parse_args()
 
-    cam = Camera.load()
+    cam = Camera.load(a.camera)
     P = np.load(a.players)
     J = json.load(open(a.data))
     meta = J["players"]

@@ -1,4 +1,4 @@
-"""Court model and the fixed match camera.
+"""Court model and a fixed camera looking at it.
 
 Court coordinates (metres) match index.html: origin at the net centre on the
 floor, +x toward the far baseline, +y to the left as seen from behind the near
@@ -14,25 +14,34 @@ import cv2
 import numpy as np
 
 HALF_L, HALF_W, KITCHEN = 6.7056, 3.048, 2.1336
-CAMERA_JSON = Path(__file__).with_name("camera.json")
+L_, W_, K_ = HALF_L, HALF_W, KITCHEN
 
-# Rough guides for the near-half court lines, in 960x540 image coordinates for
-# the fixed camera in match.mp4. The fit snaps them to the actual white pixels.
-ROUGH_LINES = {
-    "base": [(20, 268), (488, 528)],
-    "lside": [(20, 260), (372, 189)],
-    "rside": [(492, 528), (800, 276)],
-    "kitch": [(372, 189), (800, 276)],
-    "center": [(165, 348), (530, 222)],
+# Painted lines of the court model: name -> ((x0, y0), (x1, y1)). "n" = near half
+# (x < 0, the half closer to the camera), "f" = far half. Sidelines are split at the
+# net (and stop 0.3 m short of it): fitting one straight line through the net mesh
+# over the full court length biases it.
+NET_GAP = 0.3
+MODEL_LINES = {
+    "n_base": ((-L_, W_), (-L_, -W_)), "f_base": ((L_, W_), (L_, -W_)),
+    "n_kitchen": ((-K_, W_), (-K_, -W_)), "f_kitchen": ((K_, W_), (K_, -W_)),
+    "nl_side": ((-L_, W_), (-NET_GAP, W_)), "fl_side": ((NET_GAP, W_), (L_, W_)),
+    "nr_side": ((-L_, -W_), (-NET_GAP, -W_)), "fr_side": ((NET_GAP, -W_), (L_, -W_)),
+    "n_center": ((-L_, 0), (-K_, 0)), "f_center": ((K_, 0), (L_, 0)),
 }
-# Court points as intersections of fitted lines.
-CORNERS = {
-    "NL": (("base", "lside"), (-HALF_L, HALF_W, 0)),
-    "NR": (("base", "rside"), (-HALF_L, -HALF_W, 0)),
-    "KL": (("kitch", "lside"), (-KITCHEN, HALF_W, 0)),
-    "KR": (("kitch", "rside"), (-KITCHEN, -HALF_W, 0)),
-    "CB": (("base", "center"), (-HALF_L, 0, 0)),
-    "CK": (("kitch", "center"), (-KITCHEN, 0, 0)),
+# Named court points (line intersections), in the order the click fallback asks for them.
+MODEL_POINTS = {
+    "near-left corner": (("n_base", "nl_side"), (-L_, W_)),
+    "near-right corner": (("n_base", "nr_side"), (-L_, -W_)),
+    "far-right corner": (("f_base", "fr_side"), (L_, -W_)),
+    "far-left corner": (("f_base", "fl_side"), (L_, W_)),
+    "near kitchen, left end": (("n_kitchen", "nl_side"), (-K_, W_)),
+    "near kitchen, right end": (("n_kitchen", "nr_side"), (-K_, -W_)),
+    "far kitchen, right end": (("f_kitchen", "fr_side"), (K_, -W_)),
+    "far kitchen, left end": (("f_kitchen", "fl_side"), (K_, W_)),
+    "near baseline, centre mark": (("n_base", "n_center"), (-L_, 0)),
+    "near kitchen, centre": (("n_kitchen", "n_center"), (-K_, 0)),
+    "far kitchen, centre": (("f_kitchen", "f_center"), (K_, 0)),
+    "far baseline, centre mark": (("f_base", "f_center"), (L_, 0)),
 }
 
 
@@ -92,65 +101,125 @@ class Camera:
         return cls(np.array(d["K"]), np.array(d["rvec"]).reshape(3, 1), np.array(d["tvec"]).reshape(3, 1), tuple(d["size"]))
 
     @classmethod
-    def load(cls, path: Path = CAMERA_JSON) -> "Camera":
+    def load(cls, path) -> "Camera":
         return cls.from_json(json.loads(Path(path).read_text()))
 
 
-def _fit_lines(img: np.ndarray) -> dict[str, tuple[np.ndarray, float]]:
-    H, W = img.shape[:2]
-    sx, sy = W / 960, H / 540
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    white = (hsv[..., 1] < 60) & (hsv[..., 2] > 170)
-    ys, xs = np.nonzero(white)
-    P = np.stack([xs, ys], 1).astype(float)
-    fit = {}
-    for k, (a, b) in ROUGH_LINES.items():
-        a = np.array(a) * (sx, sy); b = np.array(b) * (sx, sy)
-        d = (b - a) / np.linalg.norm(b - a)
-        n = np.array([-d[1], d[0]]); c0 = n @ a
-        t = (P - a) @ d
-        band = (t > 40) & (t < np.linalg.norm(b - a) - 40)
-        tol = 10.0
-        for _ in range(3):  # shrink the band around the refit line to drop players/shadows
-            m = band & (np.abs(P @ n - c0) < tol)
-            Q = P[m]
-            if len(Q) < 50:
-                raise ValueError(f"court line {k!r} not found")
-            c = Q.mean(0)
-            _, _, vt = np.linalg.svd(Q - c)
-            n = np.array([-vt[0][1], vt[0][0]]); c0 = n @ c
-            tol = 4.0
-        fit[k] = (n, c0)
-    return fit
-
-
-def solve(img: np.ndarray) -> tuple[Camera, float, dict[str, np.ndarray]]:
-    """Solve the camera from one frame. Returns (camera, mean reprojection px, image points)."""
-    H, W = img.shape[:2]
-    fit = _fit_lines(img)
-
-    def cross(a, b):
-        A = np.array([fit[a][0], fit[b][0]])
-        return np.linalg.solve(A, [fit[a][1], fit[b][1]])
-
-    names = list(CORNERS)
-    img_pts = np.array([cross(*CORNERS[k][0]) for k in names], np.float64)
-    obj = np.array([CORNERS[k][1] for k in names], np.float64)
+def solve_pnp(img_pts: np.ndarray, court_xy: np.ndarray, size: tuple[int, int]) -> tuple[Camera, float]:
+    """Camera from ≥4 floor correspondences (pixels ↔ court x, y), sweeping the focal
+    length (square pixels, centred principal point, no distortion). Returns (camera, mean px error)."""
+    W, H = size
+    obj = np.c_[np.asarray(court_xy, np.float64), np.zeros(len(court_xy))]
+    img_pts = np.asarray(img_pts, np.float64)
     best = None
-    for f in np.linspace(800, 3000, 221) * (H / 1080):
+    for f in np.geomspace(0.35, 4.0, 160) * W:
         K = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1]])
-        _, r, t = cv2.solvePnP(obj, img_pts, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
-        pr, _ = cv2.projectPoints(obj, r, t, K, None)
-        e = float(np.linalg.norm(pr.reshape(-1, 2) - img_pts, axis=1).mean())
-        if best is None or e < best[0]:
-            best = (e, Camera(K, r, t, (W, H)))
-    return best[1], best[0], dict(zip(names, img_pts))
+        ok, r, t = cv2.solvePnP(obj, img_pts, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok:
+            continue
+        cam = Camera(K, r, t, (W, H))
+        if cam.center[2] <= 0.3:          # camera must be above the floor
+            continue
+        e = float(np.linalg.norm(cam.project(obj) - img_pts, axis=1).mean())
+        if best is None or e < best[1]:
+            best = (cam, e)
+    if best is None:
+        raise ValueError("no camera fits these points")
+    return best
+
+
+def white_mask(img: np.ndarray) -> np.ndarray:
+    """Painted-line pixels: unsaturated and brighter than the floor around them
+    (white top-hat keeps bright structures narrower than ~41 px, i.e. lines, not walls)."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    tophat = cv2.morphologyEx(hsv[..., 2], cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_RECT, (41, 41)))
+    return ((hsv[..., 1] < 80) & (hsv[..., 2] > 120) & (tophat > 25)).astype(np.uint8)
+
+
+def fit_line_near(mask: np.ndarray, p0, p1, band: float = 12.0):
+    """Total-least-squares line through mask pixels within `band` px of segment p0–p1.
+    Returns (normal, offset) or None."""
+    ys, xs = np.nonzero(mask)
+    P = np.stack([xs, ys], 1).astype(float)
+    p0, p1 = np.asarray(p0, float), np.asarray(p1, float)
+    L = np.linalg.norm(p1 - p0)
+    if L < 30:
+        return None
+    d = (p1 - p0) / L
+    n = np.array([-d[1], d[0]]); c0 = n @ p0
+    t = (P - p0) @ d
+    near = (t > 0.04 * L) & (t < 0.96 * L)
+    tol = band
+    for _ in range(3):
+        m = near & (np.abs(P @ n - c0) < tol)
+        Q = P[m]
+        if len(Q) < max(40, 0.3 * L):
+            return None
+        c = Q.mean(0)
+        _, _, vt = np.linalg.svd(Q - c)
+        n = np.array([-vt[0][1], vt[0][0]]); c0 = n @ c
+        tol = 4.0
+    return n, c0
+
+
+def visible_segment(cam: Camera, line, margin: int = 4, n: int = 200):
+    """The part of a model line that projects inside the image, as two pixel endpoints."""
+    (x0, y0), (x1, y1) = line
+    s = np.linspace(0, 1, n)[:, None]
+    pts = np.c_[np.array([x0, y0]) + s * (np.array([x1 - x0, y1 - y0])), np.zeros(n)]
+    px = cam.project(pts)
+    W, H = cam.size
+    inside = (px[:, 0] > margin) & (px[:, 0] < W - margin) & (px[:, 1] > margin) & (px[:, 1] < H - margin)
+    if inside.sum() < 10:
+        return None
+    k = np.flatnonzero(inside)
+    return px[k[0]], px[k[-1]]
+
+
+def refine(img: np.ndarray, cam: Camera, iters: int = 2) -> tuple[Camera, float, int]:
+    """Snap the court model to the painted lines: fit each visible model line to white
+    pixels near its projection, intersect, and re-solve. Returns (camera, px error, #points)."""
+    mask = white_mask(img)
+    used = 0
+    err = np.inf
+    for _ in range(iters):
+        fits = {}
+        for name, line in MODEL_LINES.items():
+            seg = visible_segment(cam, line)
+            if seg is not None:
+                f = fit_line_near(mask, *seg)
+                if f is not None:
+                    fits[name] = f
+        img_pts, court = [], []
+        W, H = cam.size
+        for (la, lb), xy in MODEL_POINTS.values():
+            if la in fits and lb in fits:
+                A = np.array([fits[la][0], fits[lb][0]])
+                if abs(np.linalg.det(A)) < 1e-3:
+                    continue
+                p = np.linalg.solve(A, [fits[la][1], fits[lb][1]])
+                if -20 < p[0] < W + 20 and -20 < p[1] < H + 20:
+                    img_pts.append(p); court.append(xy)
+        if len(img_pts) < 4:
+            break
+        img_pts, court = np.array(img_pts), np.array(court)
+        # Near-half intersections are large and well measured; far ones are tiny,
+        # foreshortened and sit next to the neighbouring court's lines. Solve from the
+        # near half, then admit far points only where they agree with it.
+        near = court[:, 0] < 0
+        base = near if near.sum() >= 4 else np.ones(len(court), bool)
+        cam, err = solve_pnp(img_pts[base], court[base], cam.size)
+        res = np.linalg.norm(cam.project(np.c_[court, np.zeros(len(court))]) - img_pts, axis=1)
+        keep = base & (res < max(3.0, 3 * np.median(res[base]))) | (~base & (res < 6.0))
+        if keep.sum() >= 4 and not (keep == base).all():
+            img_pts, court = img_pts[keep], court[keep]
+            cam, err = solve_pnp(img_pts, court, cam.size)
+        used = len(img_pts)
+    return cam, err, used
 
 
 def court_segments() -> list[tuple[tuple[float, float], tuple[float, float]]]:
-    L, W, K = HALF_L, HALF_W, KITCHEN
-    return [((-L, W), (L, W)), ((-L, -W), (L, -W)), ((-L, W), (-L, -W)), ((L, W), (L, -W)),
-            ((-K, W), (-K, -W)), ((K, W), (K, -W)), ((-L, 0), (-K, 0)), ((K, 0), (L, 0))]
+    return list(MODEL_LINES.values())
 
 
 def draw_court(img: np.ndarray, cam: Camera, color=(0, 0, 255), thickness=2) -> np.ndarray:

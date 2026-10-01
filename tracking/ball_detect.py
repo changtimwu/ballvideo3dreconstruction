@@ -47,6 +47,7 @@ def static_mask(cap, n_total, samples=120):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", required=True, help="camera.json from tracking.calibrate")
     ap.add_argument("video")
     ap.add_argument("--start", type=float, default=0)
     ap.add_argument("--end", type=float, default=None)
@@ -54,7 +55,7 @@ def main():
     ap.add_argument("--out", default="data/ball_candidates.npz")
     a = ap.parse_args()
 
-    cam = Camera.load()
+    cam = Camera.load(a.camera)
     cap = cv2.VideoCapture(a.video)
     fps = cap.get(cv2.CAP_PROP_FPS)
     n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))

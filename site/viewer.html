@@ -5,12 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>匹克球 3D 重建</title>
 <!--
-  匹克球 3D 重建 · v2 — single-file playback viewer.
+  匹克球 3D 重建 · v2 — playback viewer for one analysed video.
 
-  Open index.html directly in Chrome, or serve the folder (python3 -m http.server) so
-  tracking_data.json next to this file is picked up automatically. Under file:// Chrome
-  blocks fetch(), so use the 「載入 JSON」 button or drag the file onto the page.
-  Without tracking data the viewer runs on a generated demo dataset.
+  Opened from the video list (index.html) as viewer.html?v=<youtube id>. Loads
+  data/<id>.json (tracking) and videos.json (title, fps), and plays the original
+  video with the YouTube IFrame player; the transport bar drives that player and
+  the 3D scene follows its clock. Deep-link options go in the hash:
+  #cam=broadcast&t=120.5&panel=0&trails=0
 
   tracking_data.json schema (all distances in metres)
   ---------------------------------------------------
@@ -86,15 +87,18 @@
   .rally-mark { position: absolute; top: 0; bottom: 0; background: rgba(125,211,252,.35); }
 
   #videoPanel { transition: width .35s cubic-bezier(.4,0,.2,1), opacity .25s; }
-  #videoPanel.collapsed { width: 0 !important; opacity: 0; border-left-width: 0; }
   .legend-dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 2px rgba(255,255,255,.12); }
-  #dropHint { transition: opacity .15s; }
+  /* Collapsed: a mini player in the corner. YouTube players must stay ≥ 200×200 px
+     to keep playing, so the panel shrinks instead of disappearing. */
+  #videoPanel.collapsed { position: absolute; right: 16px; bottom: 16px; width: 356px !important; height: 210px;
+    opacity: 1; border: 1px solid var(--line); border-radius: 12px; z-index: 20; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  #videoPanel.collapsed .panel-chrome { display: none; }
 </style>
 </head>
 <body>
 <div class="h-full flex flex-col">
   <!-- Stage -->
-  <div class="flex-1 min-h-0 flex">
+  <div class="flex-1 min-h-0 flex relative">
     <!-- 3D canvas -->
     <div id="stage" class="relative flex-1 min-w-0">
       <canvas id="gl" class="absolute inset-0 w-full h-full block outline-none"></canvas>
@@ -104,35 +108,23 @@
         <div>
           <h1 class="text-xl font-semibold tracking-wide">匹克球 3D 重建 · v2</h1>
           <p class="text-xs mt-1" style="color: var(--muted)">環繞視角 · 拖曳旋轉 · 滾輪縮放</p>
+          <p id="videoTitle" class="text-sm mt-2 max-w-xl truncate" style="color: var(--text)"></p>
           <div id="legend" class="mt-3 inline-flex flex-wrap gap-x-4 gap-y-2 px-3 py-2 rounded-lg text-xs"
                style="background: rgba(13,20,18,.75); border: 1px solid var(--line);"></div>
         </div>
         <div class="pointer-events-auto flex items-center gap-2">
-          <span id="dataBadge" class="text-xs px-2 py-1 rounded-md" style="background: rgba(13,20,18,.75); border: 1px solid var(--line); color: var(--muted)">載入中…</span>
-          <label class="btn cursor-pointer" title="載入 tracking_data.json（或拖曳檔案到頁面）">
-            載入 JSON<input id="fileInput" type="file" accept=".json,application/json" class="hidden" />
-          </label>
+          <a href="index.html" class="btn" title="回到影片列表">← 影片列表</a>
+          <a id="ytLink" class="btn" target="_blank" rel="noopener" title="在 YouTube 開啟">YouTube ↗</a>
         </div>
       </div>
 
-      <div id="dropHint" class="pointer-events-none absolute inset-3 rounded-2xl border-2 border-dashed flex items-center justify-center text-lg opacity-0"
-           style="border-color: var(--accent); background: rgba(7,11,10,.6)">放開以載入 tracking_data.json 或 match.mp4</div>
     </div>
 
     <!-- Video -->
     <aside id="videoPanel" class="relative shrink-0 border-l overflow-hidden flex flex-col" style="width: 40%; background: #000; border-color: var(--line)">
-      <div class="flex-1 min-h-0 flex items-center justify-center">
-        <video id="video" src="match.mp4" preload="auto" playsinline class="w-full h-full object-contain"></video>
-      </div>
-      <div id="videoMsg" class="hidden absolute inset-0 flex flex-col items-center justify-center gap-4 text-sm text-center px-6" style="color: var(--muted)">
-        <p>找不到 match.mp4。請選擇本機的影片檔（或拖曳到頁面）。<br />下載方式見 README；未載入前 3D 播放使用內部時鐘。</p>
-        <label class="btn cursor-pointer" style="height:38px;padding:0 18px">選擇 match.mp4<input type="file" accept="video/*" class="hidden video-input" /></label>
-      </div>
-      <div class="absolute top-3 left-3 text-xs px-2 py-1 rounded-md" style="background: rgba(0,0,0,.6); color: var(--muted)">原始影片</div>
-      <div class="absolute top-2 right-2 flex gap-2">
-        <label class="btn cursor-pointer" title="從本機載入影片檔">載入影片<input type="file" accept="video/*" class="hidden video-input" /></label>
-        <button id="muteBtn" class="btn btn-icon" title="靜音 / 取消靜音" aria-label="靜音">🔈</button>
-      </div>
+      <div class="flex-1 min-h-0 relative"><div id="yt" class="absolute inset-0 w-full h-full"></div></div>
+      <div class="panel-chrome absolute top-3 left-3 text-xs px-2 py-1 rounded-md pointer-events-none" style="background: rgba(0,0,0,.6); color: var(--muted)">原始影片</div>
+      <button id="muteBtn" class="panel-chrome btn btn-icon absolute top-2 right-2" title="靜音 / 取消靜音" aria-label="靜音">🔈</button>
     </aside>
   </div>
 
@@ -207,189 +199,6 @@ const DEFAULT_PLAYERS = [
 
 // court (x, y, z) → three.js (X, Y, Z): Y is up, court +y maps to -Z.
 const toV = (x, y, z = 0, out = new THREE.Vector3()) => out.set(x, z, -y);
-
-// ───────────────────────────── demo data ─────────────────────────────
-function mulberry32(a) {
-  return () => {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-// Synthesises rallies with ballistic ball flight, bounces and players that chase
-// each hit point. It emits the same JSON shape as tracking_data.json.
-function generateDemo(duration = 940, fps = 30) {
-  const rnd = mulberry32(20260930);
-  const r = (a, b) => a + (b - a) * rnd();
-  const segs = [];            // ballistic pieces: { t0, t1, p:[x,y,z], v:[vx,vy,vz] }
-  const hits = [], bounces = [], rallies = [];
-  const homeY = [1.5, -1.5, -1.5, 1.5];   // near team faces +x (left = +y); far team faces -x
-  const teamPlayers = [[0, 1], [2, 3]];
-
-  const ballAt = (s, tau) => [s.p[0] + s.v[0] * tau, s.p[1] + s.v[1] * tau, s.p[2] + s.v[2] * tau - 0.5 * G * tau * tau];
-  const launch = (H, L, T) => [(L[0] - H[0]) / T, (L[1] - H[1]) / T, (0.5 * G * T * T - H[2]) / T];
-  const pickHitter = (team, y) => {
-    const [a, b] = teamPlayers[team];
-    return Math.abs(homeY[a] - y) < Math.abs(homeY[b] - y) ? a : b;
-  };
-
-  let t = 3, rallyIdx = 0;
-  while (t < duration - 20) {
-    const ts = t + r(4, 7);
-    let team = Math.floor(rallyIdx / 2) % 2;
-    let side = team === 0 ? -1 : 1;                // x sign of the hitting team's half
-    const serverY = (rallyIdx % 2 ? 1 : -1) * r(0.8, 2.0);
-    let hitter = pickHitter(team, serverY);
-    let H = [side * 7.0, serverY, 0.7];
-    let tHit = ts;
-    const nShots = 3 + Math.floor(rnd() * 11);
-    rallies.push({ ts: tHit - 0.4 });
-    // Toss before the serve.
-    segs.push({ t0: tHit - 0.4, t1: tHit, p: [H[0], H[1], 0.9], v: [0, 0, (H[2] - 0.9 + 0.5 * G * 0.16) / 0.4] });
-
-    for (let k = 0; k < nShots; k++) {
-      hits.push({ t: tHit, player: hitter, pos: H.slice() });
-      const final = k === nShots - 1;
-      const bothUp = k >= 4;
-      let L, T;
-      if (k === 0) {
-        L = [-side * r(3.2, 6.2), -Math.sign(serverY) * r(0.4, 2.7), 0];
-      } else if (bothUp && rnd() < 0.5) {
-        L = [-side * r(0.5, 2.0), r(-2.6, 2.6), 0];          // dink into the kitchen
-      } else {
-        L = [-side * r(2.5, 6.4), r(-2.8, 2.8), 0];
-      }
-      if (final && rnd() < 0.5) L[1] = Math.sign(L[1] || 1) * r(3.2, 3.8); // wide winner / miss
-      const D = Math.hypot(L[0] - H[0], L[1] - H[1]);
-      const dink = Math.abs(L[0]) < 2.1;
-      T = D / (k === 0 ? 11 : dink ? 5.5 : r(9, 15));
-      let v = launch(H, L, T);
-      for (let i = 0; i < 30; i++) {                          // raise the arc until it clears the net
-        const tc = -H[0] / v[0];
-        const zc = H[2] + v[2] * tc - 0.5 * G * tc * tc;
-        if (zc > 1.0) break;
-        T *= 1.06; v = launch(H, L, T);
-      }
-      const s1 = { t0: tHit, t1: tHit + T, p: H.slice(), v };
-      segs.push(s1);
-
-      const rTeam = 1 - team;
-      // Volley: receiver takes it out of the air on the way down, outside the kitchen.
-      if (!final && k >= 2 && rnd() < 0.35) {
-        const a = -0.5 * G, b = v[2], c = H[2] - 1.0;
-        const disc = b * b - 4 * a * c;
-        if (disc > 0) {
-          const tv = (-b - Math.sqrt(disc)) / (2 * a);
-          const P = ballAt(s1, tv);
-          if (tv > 0.25 && tv < T && Math.abs(P[0]) > 2.3 && Math.abs(P[0]) < 7.2 && Math.abs(P[1]) < 3.6) {
-            s1.t1 = tHit + tv;
-            tHit = s1.t1; H = P; team = rTeam; side = -side; hitter = pickHitter(team, P[1]);
-            continue;
-          }
-        }
-      }
-      bounces.push({ t: s1.t1, pos: [L[0], L[1]] });
-      const land = ballAt(s1, T);
-      const vz0 = v[2] - G * T;
-      let bv = [v[0] * 0.78, v[1] * 0.78, -vz0 * 0.62];
-      if (final) {
-        // Nobody reaches it: let the ball bounce out, then end the rally.
-        let tt = s1.t1, p = [land[0], land[1], 0];
-        for (let n = 0; n < 4; n++) {
-          const tf = (2 * bv[2]) / G;
-          segs.push({ t0: tt, t1: tt + tf, p, v: bv });
-          tt += tf; p = [p[0] + bv[0] * tf, p[1] + bv[1] * tf, 0];
-          if (n < 3) bounces.push({ t: tt, pos: [p[0], p[1]] });
-          bv = [bv[0] * 0.8, bv[1] * 0.8, bv[2] * 0.55];
-        }
-        rallies[rallies.length - 1].te = tt;
-        t = tt;
-        break;
-      }
-      const s2 = { t0: s1.t1, t1: 0, p: [land[0], land[1], 0], v: bv };
-      // Take it on the way down at ~0.75 m, or at the apex if it never gets that high.
-      const a = -0.5 * G, b = bv[2], c = -0.75;
-      const disc = b * b - 4 * a * c;
-      const tr = disc > 0 ? (-b - Math.sqrt(disc)) / (2 * a) : bv[2] / G;
-      s2.t1 = s2.t0 + tr;
-      segs.push(s2);
-      tHit = s2.t1; H = ballAt(s2, tr); team = rTeam; side = -side;
-      hitter = pickHitter(team, H[1]);
-    }
-    rallyIdx++;
-  }
-
-  // Players: kinematic chase of either the next hit point or a formation spot.
-  const dt = 1 / fps, n = Math.ceil(duration * fps) + 1;
-  const pos = [[-5.6, 1.5], [-5.6, -1.5], [5.6, -1.5], [5.6, 1.5]];
-  const vel = pos.map(() => [0, 0]);
-  const hitsBy = [0, 1, 2, 3].map(i => hits.filter(h => h.player === i));
-  const ptr = [0, 0, 0, 0];
-  const frames = [];
-  let segI = 0, rI = 0, hitI = 0;
-  const wander = [0, 1, 2, 3].map(() => [r(0, 6.28), r(0, 6.28)]);
-
-  for (let f = 0; f < n; f++) {
-    const time = f * dt;
-    while (segI < segs.length && segs[segI].t1 <= time) segI++;
-    let ball = null;
-    const s = segs[segI];
-    if (s && s.t0 <= time) {
-      const b = ballAt(s, time - s.t0);
-      ball = [+b[0].toFixed(3), +b[1].toFixed(3), +Math.max(0, b[2]).toFixed(3)];
-    }
-    while (rI < rallies.length && rallies[rI].te < time) rI++;
-    const R = rallies[rI];
-    const inRally = R && time >= R.ts - 0.2 && time <= R.te;
-    while (hitI < hits.length && hits[hitI].t <= time) hitI++;
-    const shotsSoFar = inRally ? hits.filter(h => h.t >= R.ts && h.t <= time).length : 0;
-
-    const out = [];
-    for (let i = 0; i < 4; i++) {
-      const fs = i < 2 ? 1 : -1;                    // facing sign: near faces +x
-      while (ptr[i] < hitsBy[i].length && hitsBy[i][ptr[i]].t < time) ptr[i]++;
-      const next = hitsBy[i][ptr[i]];
-      let tx, ty, vmax, tau = 0.45;
-      if (inRally && next && next.t <= R.te + 0.01 && next.t - time < 1.4) {
-        // Stand just left of and behind the contact point so the paddle (right hand) meets it.
-        tx = next.pos[0] - fs * 0.25; ty = next.pos[1] + fs * 0.45;
-        tau = Math.max(0.12, next.t - time); vmax = 6.5;
-      } else if (inRally) {
-        const depth = shotsSoFar >= 3 ? 2.6 : 6.1;
-        const by = ball ? ball[1] * 0.35 : 0;
-        tx = -fs * depth; ty = homeY[i] * 0.95 + by; vmax = 4.2;
-      } else {
-        const w = wander[i];
-        tx = -fs * (5.0 + 0.8 * Math.sin(time * 0.21 + w[0])); ty = homeY[i] * 1.1 + 0.6 * Math.sin(time * 0.17 + w[1]);
-        vmax = 1.3; tau = 1.2;
-      }
-      let dvx = (tx - pos[i][0]) / tau, dvy = (ty - pos[i][1]) / tau;
-      const sp = Math.hypot(dvx, dvy);
-      if (sp > vmax) { dvx *= vmax / sp; dvy *= vmax / sp; }
-      const k = Math.min(1, dt * 9);
-      vel[i][0] += (dvx - vel[i][0]) * k; vel[i][1] += (dvy - vel[i][1]) * k;
-      pos[i][0] += vel[i][0] * dt; pos[i][1] += vel[i][1] * dt;
-      // Keep each team on its own half.
-      pos[i][0] = fs > 0 ? Math.min(pos[i][0], -0.4) : Math.max(pos[i][0], 0.4);
-      out.push([+pos[i][0].toFixed(3), +pos[i][1].toFixed(3)]);
-    }
-    frames.push({ t: +time.toFixed(4), players: out, ball });
-  }
-
-  const events = [
-    ...hits.map(h => ({ t: h.t, type: 'hit', player: h.player })),
-    ...bounces.map(b => ({ t: b.t, type: 'bounce', pos: b.pos })),
-  ].sort((a, b) => a.t - b.t);
-
-  return {
-    fps, video_offset: 0, demo: true,
-    camera: CALIBRATED_CAMERA,
-    players: DEFAULT_PLAYERS,
-    frames, events,
-  };
-}
 
 // ───────────────────────────── data model ─────────────────────────────
 // Converts tracking JSON into typed arrays with gap filling, rallies and events.
@@ -1008,11 +817,10 @@ const bounceMarks = Array.from({ length: 16 }, () => {
 let D = null;
 let actors = [];
 const poseBuf = new Float32Array(51);
-const video = document.getElementById('video');
-let videoOK = true;
+let META = null;           // this video's entry from videos.json
 let trailsOn = true;
 
-function setData(json, sourceLabel) {
+function setData(json) {
   D = normalize(json);
   for (const a of actors) { scene.remove(a.man.group, a.trail.mesh); }
   headingState.length = 0;
@@ -1026,64 +834,66 @@ function setData(json, sourceLabel) {
   const legend = document.getElementById('legend');
   legend.innerHTML = D.meta.map(m =>
     `<span class="inline-flex items-center gap-2"><span class="legend-dot" style="background:${m.color}"></span>${m.label}</span>`).join('');
-  const badge = document.getElementById('dataBadge');
-  badge.textContent = sourceLabel;
-  badge.style.color = D.demo ? '#fbbf24' : 'var(--accent)';
-  badge.title = D.demo ? '示範資料為程式產生，球員動作與影片內容不對應' : '';
   buildRallyMarks();
   if (camMode === 'broadcast') goCam('broadcast', true);
 }
 
 // ───────────────────────────── clock ─────────────────────────────
-// Media clock: video.currentTime, refined with requestVideoFrameCallback so the
-// scene advances smoothly between decoded frames. Falls back to a free-running
-// clock when match.mp4 is missing.
+// The YouTube player is the master clock. getCurrentTime() is polled every frame
+// and smoothed: the estimate advances with wall time at the playback rate and is
+// pulled toward each reported value (snapping on jumps), so the 3D scene moves
+// continuously between the player's updates.
 const clock = {
-  rate: 1, freeT: 0, freePlaying: false, freeWall: 0,
-  vfMedia: 0, vfWall: 0,
-  get duration() { return videoOK && Number.isFinite(video.duration) ? video.duration : (D ? D.duration + D.offset : 0); },
-  get playing() { return videoOK ? !video.paused && !video.ended : this.freePlaying; },
+  player: null, ready: false, state: -1, rate: 1, est: 0, wall: performance.now(),
+  get duration() { return this.ready ? this.player.getDuration() : (D ? D.duration + D.offset : 0); },
+  get playing() { return this.state === 1 || this.state === 3; },
   now() {
-    if (!videoOK) return this.freePlaying ? this.freeT + (performance.now() - this.freeWall) / 1000 * this.rate : this.freeT;
-    const ct = video.currentTime;
-    if (video.paused || video.seeking) return ct;
-    const est = this.vfMedia + (performance.now() - this.vfWall) / 1000 * video.playbackRate;
-    return Math.abs(est - ct) < 0.15 ? est : ct;
+    const w = performance.now();
+    if (!this.ready) { this.wall = w; return this.est; }
+    const raw = this.player.getCurrentTime() || 0;
+    if (this.state === 1) {
+      this.est += (w - this.wall) / 1000 * this.rate;
+      const err = raw - this.est;
+      this.est += Math.abs(err) > 0.25 ? err : err * 0.2;
+    } else {
+      this.est = raw;
+    }
+    this.wall = w;
+    return Math.max(0, this.est);
   },
-  play() {
-    if (videoOK) return video.play().catch(() => {});
-    this.freeWall = performance.now(); this.freePlaying = true;
-  },
-  pause() {
-    if (videoOK) return video.pause();
-    this.freeT = this.now(); this.freePlaying = false;
-  },
+  play() { this.player?.playVideo(); },
+  pause() { this.player?.pauseVideo(); },
   seek(t) {
     t = THREE.MathUtils.clamp(t, 0, this.duration || 0);
-    if (videoOK) { video.currentTime = t; this.vfMedia = t; this.vfWall = performance.now(); }
-    else { this.freeT = t; this.freeWall = performance.now(); }
+    this.est = t; this.wall = performance.now();
+    this.player?.seekTo(t, true);
   },
-  setRate(r) {
-    if (!videoOK) this.freeT = this.now();
-    this.freeWall = performance.now();
-    this.rate = r; video.playbackRate = r;
-  },
+  setRate(r) { this.rate = r; this.player?.setPlaybackRate(r); },
 };
-if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
-  const onVF = (now, meta) => { clock.vfMedia = meta.mediaTime; clock.vfWall = now; video.requestVideoFrameCallback(onVF); };
-  video.requestVideoFrameCallback(onVF);
+
+function loadYouTubeAPI() {
+  return new Promise(resolve => {
+    if (window.YT?.Player) return resolve();
+    window.onYouTubeIframeAPIReady = resolve;
+    const s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  });
 }
-function onVideoError() {
-  videoOK = false;
-  document.getElementById('videoMsg').classList.remove('hidden');
-  updatePlayIcon(); buildRallyMarks();
+
+function createPlayer(videoId) {
+  return new Promise(resolve => {
+    clock.player = new YT.Player('yt', {
+      videoId, width: '100%', height: '100%',
+      playerVars: { controls: 0, disablekb: 1, playsinline: 1, rel: 0, modestbranding: 1, iv_load_policy: 3 },
+      events: {
+        onReady: () => { clock.ready = true; clock.player.setPlaybackRate(clock.rate); buildRallyMarks(); updatePlayIcon(); resolve(); },
+        onStateChange: e => { clock.state = e.data; updatePlayIcon(); },
+        onPlaybackRateChange: e => { clock.rate = e.data; },
+      },
+    });
+  });
 }
-video.addEventListener('error', onVideoError);
-// The module loads after the CDN imports resolve, so a missing match.mp4 may
-// already have failed before the listener exists.
-if (video.error) onVideoError();
-video.addEventListener('loadedmetadata', buildRallyMarks);
-for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, updatePlayIcon);
 
 // ───────────────────────────── camera presets ─────────────────────────────
 let camMode = 'orbit';
@@ -1195,7 +1005,7 @@ function updatePlayIcon() {
 function togglePlay() { clock.playing ? clock.pause() : clock.play(); setTimeout(updatePlayIcon, 0); }
 function step(dir) {
   clock.pause();
-  const fps = videoOK ? VIDEO_FPS : 30;
+  const fps = META?.video_fps || VIDEO_FPS;
   const f = Math.round(clock.now() * fps) + dir;
   clock.seek(f / fps + 0.0005);
   updatePlayIcon();
@@ -1239,8 +1049,11 @@ function setVideoPanel(open) {
 videoBtn.onclick = () => setVideoPanel(videoPanel.classList.contains('collapsed'));
 
 const muteBtn = document.getElementById('muteBtn');
-video.muted = false;
-muteBtn.onclick = () => { video.muted = !video.muted; muteBtn.textContent = video.muted ? '🔇' : '🔈'; };
+muteBtn.onclick = () => {
+  if (!clock.ready) return;
+  clock.player.isMuted() ? clock.player.unMute() : clock.player.mute();
+  setTimeout(() => { muteBtn.textContent = clock.player.isMuted() ? '🔇' : '🔈'; }, 50);
+};
 
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
@@ -1254,53 +1067,21 @@ window.addEventListener('keydown', e => {
 });
 
 // ───────────────────────────── data loading ─────────────────────────────
-async function loadFile(file) {
-  try {
-    const json = JSON.parse(await file.text());
-    setData(json, `資料：${file.name}`);
-  } catch (err) {
-    alert(`無法載入 ${file.name}：${err.message}`);
-  }
-}
-document.getElementById('fileInput').addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); e.target.value = ''; });
-const dropHint = document.getElementById('dropHint');
-window.addEventListener('dragover', e => { e.preventDefault(); dropHint.style.opacity = 1; });
-window.addEventListener('dragleave', e => { if (!e.relatedTarget) dropHint.style.opacity = 0; });
-window.addEventListener('drop', e => {
-  e.preventDefault(); dropHint.style.opacity = 0;
-  const files = [...e.dataTransfer.files];
-  const f = files.find(f => f.name.endsWith('.json'));
-  if (f) loadFile(f);
-  const v = files.find(f => f.type.startsWith('video/'));
-  if (v) loadVideo(v);
-});
-
-// A local video file replaces match.mp4 — needed on GitHub Pages, where the
-// 365 MB video can't be hosted. Playback resumes at the current position.
-let videoURL = null;
-function loadVideo(file) {
-  const t = clock.now();
-  clock.pause();
-  if (videoURL) URL.revokeObjectURL(videoURL);
-  videoURL = URL.createObjectURL(file);
-  videoOK = true;
-  document.getElementById('videoMsg').classList.add('hidden');
-  video.src = videoURL;
-  video.addEventListener('loadedmetadata', () => { video.playbackRate = clock.rate; clock.seek(t); updatePlayIcon(); }, { once: true });
-}
-document.querySelectorAll('.video-input').forEach(inp => inp.addEventListener('change', e => {
-  if (e.target.files[0]) loadVideo(e.target.files[0]);
-  e.target.value = '';
-}));
-
 async function boot() {
-  try {
-    const res = await fetch('tracking_data.json', { cache: 'no-store' });
-    if (!res.ok) throw new Error(res.status);
-    setData(await res.json(), '資料：tracking_data.json');
-  } catch {
-    setData(generateDemo(), '示範資料（非真實追蹤）');
-  }
+  const id = new URLSearchParams(location.search).get('v');
+  if (!id) { location.replace('index.html'); return false; }
+  const [data, list] = await Promise.all([
+    fetch(`data/${encodeURIComponent(id)}.json`).then(r => { if (!r.ok) throw new Error(`data/${id}.json: ${r.status}`); return r.json(); }),
+    fetch('videos.json').then(r => r.ok ? r.json() : { videos: [] }).catch(() => ({ videos: [] })),
+  ]);
+  META = (list.videos || []).find(v => v.id === id) || { id };
+  document.title = META.title ? `${META.title} · 匹克球 3D 重建` : '匹克球 3D 重建';
+  document.getElementById('videoTitle').textContent = META.title || id;
+  document.getElementById('ytLink').href = META.url || `https://www.youtube.com/watch?v=${id}`;
+  setData(data);
+  await loadYouTubeAPI();
+  await createPlayer(id);
+  return true;
 }
 
 // ───────────────────────────── frame loop ─────────────────────────────
@@ -1404,14 +1185,16 @@ function applyHash() {
   goCam(['orbit', 'broadcast', 'top', 'baseline', 'side'].includes(cam) ? cam : 'orbit', true);
   const t = parseFloat(h.get('t'));
   if (Number.isFinite(t)) {
-    if (videoOK && video.readyState < 1) video.addEventListener('loadedmetadata', () => clock.seek(t), { once: true });
-    else clock.seek(t);
+    clock.seek(t);
   }
 }
 
 resize();
 updatePlayIcon();
-boot().then(() => { applyHash(); requestAnimationFrame(frame); });
+requestAnimationFrame(frame);
+boot().then(ok => { if (ok) applyHash(); }).catch(err => {
+  document.getElementById('videoTitle').textContent = `無法載入：${err.message}`;
+});
 </script>
 </body>
 </html>

@@ -180,6 +180,7 @@ def select_non_overlapping(tracks):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--camera", required=True, help="camera.json from tracking.calibrate")
     ap.add_argument("--cand", default="data/ball_candidates.npz")
     ap.add_argument("--out", default="data/ball2d.npz")
     a = ap.parse_args()
@@ -190,7 +191,7 @@ def main():
     for i, f in enumerate(cand[:, 0].astype(int)):
         by_frame.setdefault(f, []).append(i)
     tracks = build_tracks(cand, by_frame, sorted(by_frame))
-    cam = Camera.load()
+    cam = Camera.load(a.camera)
     good = [t for t in tracks if plausible(t, cand, cam)]
     chosen = select_non_overlapping(good)
     print(f"{len(tracks)} tracks, {len(good)} plausible, {len(chosen)} selected")

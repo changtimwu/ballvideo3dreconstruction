@@ -1,80 +1,108 @@
 # CLAUDE.md
 
-Pickleball doubles 3D reconstruction viewer. See README.md for setup, controls and the data
-format. The original spec is in `prompts.md`.
+Pickleball doubles 3D reconstruction from YouTube videos. See README.md for setup, the
+`analyze` CLI, controls and the data format. The original viewer spec is in `prompts.md`.
 
-## Layout
+## Layout and flow
 
-- `index.html`: the entire app: one ES-module script, three@0.170.0 and OrbitControls via a
-  jsdelivr import map, and Tailwind via CDN. There's no build step and no package.json. Keep
-  it single-file.
-- `tracking/`: the Python pipeline that writes `tracking_data.json` (README §4). It uses
-  `uv` (`pyproject.toml`, Python 3.12) and stages `check_camera → detect → appearance → track → export`,
-  plus `overlay` for QA. Run stages as modules (`uv run python -m tracking.<stage>`).
-  Intermediate artefacts go to `data/` (gitignored). `tracking_data.json` itself is
-  committed, so GitHub Pages serves real data.
-- `tracking/camera.py`: the court model and camera (projection, pixel → floor-plane rays,
-  `line_score` court-visibility test). `tracking/camera.json` is the solved camera.
-- `match.mp4` is gitignored (~365 MB). README §1 has the exact yt-dlp command to fetch it.
-- If `tracking_data.json` can't be fetched (e.g. under `file://`), the viewer uses
-  `generateDemo()`, which makes synthetic rallies in the page.
+- **Analysis is local; publishing is CI.**
+  - `uv run python -m tracking analyze <url>` downloads the video to `work/<id>/`
+    (gitignored), runs the stages, writes `videos/<id>/{tracking_data,camera,meta}.json`,
+    then commits and pushes.
+  - `.github/workflows/pages.yml` runs `tools/build_site.py`, which builds `_site/` from
+    `site/*` + `videos/*/` and generates `videos.json`. Pages is deployed by Actions, not
+    from a branch.
+  - Never commit videos or `work/`.
+- **`site/viewer.html`** is the whole viewer: one ES-module script, three@0.170.0 and
+  OrbitControls via a jsdelivr import map, Tailwind via CDN, and the YouTube IFrame API.
+  There's no build step and no package.json; keep it a single file. It's opened as
+  `viewer.html?v=<id>` and fetches `data/<id>.json` and `videos.json`.
+- **`site/index.html`** is the video list, rendered from `videos.json`.
+- **`tracking/`** is the pipeline, using `uv` (`pyproject.toml`, Python 3.12).
+  - `__main__.py`: the `analyze` CLI. Stages are skipped when their output exists, so
+    reruns resume.
+  - Stage order: `calibrate → detect → appearance → track → ball_detect → ball_track →
+    ball3d → export`.
+  - QA tools: `overlay`, `identity_frames`, `ball_qa`, `ball_check`.
+  - Every camera-dependent stage takes a required `--camera`, so there is no global
+    camera.
+- **`tracking/camera.py`** holds the court model (`MODEL_LINES`, `MODEL_POINTS`; sidelines
+  split at the net), the `Camera` class, `solve_pnp`, `refine` (snap the model to painted
+  lines) and `line_score` (is the court visible).
 
 ## Conventions that matter
 
 - **Court coordinates everywhere in data and logic:**
   - Metres; the origin is the net centre on the floor.
   - `+x` points to the far baseline, `+y` is left as seen from the near baseline, `z` is up.
+  - "Near" means the half closer to the camera; `calibrate.orient_near` enforces it.
 - **Convert to three.js only at the render boundary,** with `toV(x, y, z)`, which gives
   `(x, z, -y)`. Don't mix the two spaces.
-- **Player index order** comes from `players[]` in the JSON. `team` groups partners; in the
-  real data team 0 is whoever starts on the near side.
-- **The video is the master clock.** `clock.now()` uses `video.currentTime`, refined with
-  `requestVideoFrameCallback`. A free-running clock takes over only when the video fails to
-  load. Data time = video time − `video_offset`.
+- **Player index order** comes from `players[]` in the JSON. `team` groups partners;
+  team 0 is whoever starts on the near side.
+- **The YouTube player is the master clock.** `clock.now()` advances an estimate with wall
+  time and pulls it toward `player.getCurrentTime()`. Every transport action goes through
+  the player API (`playVideo`, `seekTo`, `setPlaybackRate`, `mute`). Data time = video
+  time − `video_offset`.
+- **YouTube players must stay ≥ 200×200 px** to keep playing. That's why "collapsing" the
+  video panel turns it into a corner mini player instead of hiding it.
 - **All sampling goes through `sampleAt` / `playerXY` / `ballXYZ`.** These lerp over typed
   arrays built by `normalize()`. New data fields should be added to `normalize()`, not read
   from raw JSON in the frame loop.
-- **`CALIBRATED_CAMERA` in `index.html` mirrors `tracking/camera.json`** (written by
-  `tracking.check_camera`). Re-run that rather than hand-editing. It is tied to the 1080p60
-  H.264 encode (yt-dlp formats `299+140`).
+- **Each video's camera lives in its data** (`camera` in `tracking_data.json`, from
+  `work/<id>/camera.json`). `CALIBRATED_CAMERA` in the viewer is only a fallback.
 - **UI copy is Traditional Chinese** (zh-Hant). Keep the UI chrome as written in
   `prompts.md`. Player legend labels come from the data.
 
 ## Testing
 
-- **Open `file://.../index.html` in Chrome.** Don't serve it with `python3 -m http.server`:
-  it has no Range support, so video seeking breaks. Use `npx http-server` if you need
-  `fetch` of `tracking_data.json`.
-- **Automated tabs are often `document.visibilityState === 'hidden'`.** Chrome then pauses
-  requestAnimationFrame, so screenshots show stale frames and camera tweens don't advance.
-  For visual checks, use headless Chrome with a deep link:
+- **Local site:** `python3 tools/build_site.py && python3 -m http.server -d _site 8080`.
+  Video comes from YouTube, so no Range-capable server is needed.
+- **Automated Chrome tabs are often hidden** (`document.visibilityState === 'hidden'`).
+  Chrome then pauses requestAnimationFrame, so tweens don't advance and screenshots are
+  stale. Drive a separate headless Chrome instead:
   ```bash
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
-    --window-size=1600,1000 --timeout=7000 --screenshot=out.png \
-    "file://$PWD/index.html#cam=broadcast&t=900&panel=0"
+    --remote-debugging-port=9333 --user-data-dir=/tmp/cdp --window-size=1600,1000 \
+    --autoplay-policy=no-user-gesture-required about:blank &
+  BU_NAME=hl BU_CDP_URL=http://localhost:9333 browser-harness <<'PY'
+  new_tab("http://localhost:8080/viewer.html?v=cRRLvhKbPXM"); wait_for_load()
+  PY
   ```
-- **To check `原機位疊合` alignment,** blend that screenshot with the matching video frame
-  (`ffmpeg -ss 900 -i match.mp4 -frames:v 1 f.png`). The court lines should coincide.
-- **Pipeline QA:** after changing `track`/`export`, render
-  `uv run python -m tracking.overlay match.mp4 --start 290 --end 320` and look at frames
-  (ffmpeg `select` + `tile`). Identity swaps and foot-placement errors show up immediately;
-  the printed stats don't reveal them.
+  In that tab, the readout (`#readout`) is the easiest check that the 3D clock follows
+  YouTube.
+- **Headless WebGL screenshots can come out blank at random** (captured before the first
+  draw). Retry before debugging the viewer.
+- **Calibration:** check `work/<id>/calib.jpg` (the court model drawn on the median frame)
+  and the printed drift-check numbers.
+- **Pipeline QA:** after changing `track`/`export`, look at
+  `tracking.identity_frames` / `tracking.overlay` output, not just the printed stats.
+  Identity swaps and foot-placement errors only show up in the frames.
 
 ## Pipeline gotchas
 
-- **The footage has edited-in graphics** (an ad at ~312.5–316.4 s). Anything per-frame must
-  respect `court_score` / `court_ok`.
+- **Auto-calibration.**
+  - Score homography hypotheses by "white on the line, floor either side". Walls and
+    other clutter are white everywhere and otherwise win.
+  - Reject collapsed or tiny projections.
+  - Solve from near-half intersections first. Far ones are tiny and snap to the
+    neighbouring court's lines.
+  - Fitting one line through the net mesh biases the sidelines, hence the split.
+- **The reference video has edited-in graphics** (an ad at ~312.5–316.4 s, captions). Anything
+  per-frame must respect `court_score` / `court_ok`.
 - **Teams switch ends mid-match.** Never infer identity or facing direction from the team or
   side. The viewer faces each figure toward the net from its current half.
 - **Per-frame shirt colour is noisy** (white measured L 123–214, grey 57–148 in one
-  rally). Only use colour aggregated over tracklets. Even then, the near pair (grey vs
-  white) only separates with the multi-region descriptor (`appearance.py`). "Which shirt
-  is brighter" is not ground truth either.
+  rally). Only use colour aggregated over tracklets. Even then, similar teammates (grey vs
+  white) only separate with the multi-region descriptor (`appearance.py`). "Which shirt is
+  brighter" is not ground truth either.
+- **Team membership comes from court side.** It's anchored on the highest-chroma shirt,
+  not colour, because colour alone moved tracklets across teams.
 - **YOLO emits duplicate boxes on one person.** Without `dedupe_and_split`, they shatter
   tracklets into 1-frame pieces.
 - **The motion linker can swap people mid-tracklet** during crossings, so
   `split_on_appearance` must run before identity assignment.
-- **Verify identities by eye** with `tracking.identity_frames` (per-tracker boxes) at ~12 timestamps
+- **Verify identities by eye** with `tracking.identity_frames` at ~12 timestamps
   (including after the end switch). The tracker's own statistics looked fine while
   identities were wrong.
 - **The ball in 2D** (`ball_detect` / `ball_track`): colour separates it best. Ball hue
@@ -88,7 +116,3 @@ format. The original spec is in `prompts.md`.
   everywhere the ball is evaluated, so export and checks use the same physics as the fit.
   The batched Jacobian in `refit_chain` is why the full match takes 2 min rather than
   hours; don't swap in scipy's default finite differences.
-- **Headless Chrome screenshots of WebGL can come out blank at random** (captured before
-  the first draw). Retry before debugging the viewer. To render arbitrary times, serve a
-  copy of `index.html` + `tracking_data.json` without `match.mp4`: the internal clock can
-  seek, while a server without HTTP Range support can't seek the video.

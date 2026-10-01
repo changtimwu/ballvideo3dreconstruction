@@ -10,3 +10,5 @@
 data/
 *.pt
 __pycache__/
+work/
+_site/
