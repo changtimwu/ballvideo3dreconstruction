@@ -59,6 +59,12 @@ ffprobe -v error -show_entries format=duration:stream=codec_name,width,height,r_
 
 Open `index.html` in Chrome. That's enough for the video and the demo data.
 
+**Hosted version:** https://changtimwu.github.io/ballvideo3dreconstruction/
+
+The 365 MB video can't go on GitHub Pages, which caps files at 100 MB. After downloading
+`match.mp4` (§1), click **載入影片** in the video panel, or drag the file onto the page. The
+file stays on your machine; nothing is uploaded.
+
 To have `tracking_data.json` picked up automatically, serve the folder over HTTP. Chrome
 blocks `fetch()` from `file://`. The server must support HTTP Range requests, or video
 seeking won't work, so don't use `python3 -m http.server`.

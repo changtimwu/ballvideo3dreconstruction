@@ -116,7 +116,7 @@
       </div>
 
       <div id="dropHint" class="pointer-events-none absolute inset-3 rounded-2xl border-2 border-dashed flex items-center justify-center text-lg opacity-0"
-           style="border-color: var(--accent); background: rgba(7,11,10,.6)">放開以載入 tracking_data.json</div>
+           style="border-color: var(--accent); background: rgba(7,11,10,.6)">放開以載入 tracking_data.json 或 match.mp4</div>
     </div>
 
     <!-- Video -->
@@ -124,11 +124,15 @@
       <div class="flex-1 min-h-0 flex items-center justify-center">
         <video id="video" src="match.mp4" preload="auto" playsinline class="w-full h-full object-contain"></video>
       </div>
-      <div id="videoMsg" class="hidden absolute inset-0 flex items-center justify-center text-sm text-center px-6" style="color: var(--muted)">
-        找不到 match.mp4（請與 index.html 放在同一資料夾）<br />3D 播放將使用內部時鐘。
+      <div id="videoMsg" class="hidden absolute inset-0 flex flex-col items-center justify-center gap-4 text-sm text-center px-6" style="color: var(--muted)">
+        <p>找不到 match.mp4。請選擇本機的影片檔（或拖曳到頁面）。<br />下載方式見 README；未載入前 3D 播放使用內部時鐘。</p>
+        <label class="btn cursor-pointer" style="height:38px;padding:0 18px">選擇 match.mp4<input type="file" accept="video/*" class="hidden video-input" /></label>
       </div>
       <div class="absolute top-3 left-3 text-xs px-2 py-1 rounded-md" style="background: rgba(0,0,0,.6); color: var(--muted)">原始影片</div>
-      <button id="muteBtn" class="btn btn-icon absolute top-2 right-2" title="靜音 / 取消靜音" aria-label="靜音">🔈</button>
+      <div class="absolute top-2 right-2 flex gap-2">
+        <label class="btn cursor-pointer" title="從本機載入影片檔">載入影片<input type="file" accept="video/*" class="hidden video-input" /></label>
+        <button id="muteBtn" class="btn btn-icon" title="靜音 / 取消靜音" aria-label="靜音">🔈</button>
+      </div>
     </aside>
   </div>
 
@@ -1064,11 +1068,15 @@ if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
   const onVF = (now, meta) => { clock.vfMedia = meta.mediaTime; clock.vfWall = now; video.requestVideoFrameCallback(onVF); };
   video.requestVideoFrameCallback(onVF);
 }
-video.addEventListener('error', () => {
+function onVideoError() {
   videoOK = false;
   document.getElementById('videoMsg').classList.remove('hidden');
   updatePlayIcon(); buildRallyMarks();
-});
+}
+video.addEventListener('error', onVideoError);
+// The module loads after the CDN imports resolve, so a missing match.mp4 may
+// already have failed before the listener exists.
+if (video.error) onVideoError();
 video.addEventListener('loadedmetadata', buildRallyMarks);
 for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, updatePlayIcon);
 
@@ -1255,9 +1263,30 @@ window.addEventListener('dragover', e => { e.preventDefault(); dropHint.style.op
 window.addEventListener('dragleave', e => { if (!e.relatedTarget) dropHint.style.opacity = 0; });
 window.addEventListener('drop', e => {
   e.preventDefault(); dropHint.style.opacity = 0;
-  const f = [...e.dataTransfer.files].find(f => f.name.endsWith('.json'));
+  const files = [...e.dataTransfer.files];
+  const f = files.find(f => f.name.endsWith('.json'));
   if (f) loadFile(f);
+  const v = files.find(f => f.type.startsWith('video/'));
+  if (v) loadVideo(v);
 });
+
+// A local video file replaces match.mp4 — needed on GitHub Pages, where the
+// 365 MB video can't be hosted. Playback resumes at the current position.
+let videoURL = null;
+function loadVideo(file) {
+  const t = clock.now();
+  clock.pause();
+  if (videoURL) URL.revokeObjectURL(videoURL);
+  videoURL = URL.createObjectURL(file);
+  videoOK = true;
+  document.getElementById('videoMsg').classList.add('hidden');
+  video.src = videoURL;
+  video.addEventListener('loadedmetadata', () => { video.playbackRate = clock.rate; clock.seek(t); updatePlayIcon(); }, { once: true });
+}
+document.querySelectorAll('.video-input').forEach(inp => inp.addEventListener('change', e => {
+  if (e.target.files[0]) loadVideo(e.target.files[0]);
+  e.target.value = '';
+}));
 
 async function boot() {
   try {
