@@ -1,0 +1,1379 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>匹克球 3D 重建</title>
+<!--
+  匹克球 3D 重建 · v2 — single-file playback viewer.
+
+  Open index.html directly in Chrome, or serve the folder (python3 -m http.server) so
+  tracking_data.json next to this file is picked up automatically. Under file:// Chrome
+  blocks fetch(), so use the 「載入 JSON」 button or drag the file onto the page.
+  Without tracking data the viewer runs on a generated demo dataset.
+
+  tracking_data.json schema (all distances in metres)
+  ---------------------------------------------------
+  Court coordinates: origin = centre of the net on the floor.
+    x : along the court length, +x toward the FAR baseline (near baseline x = -6.705)
+    y : across the court, +y = left side as seen from behind the near baseline
+    z : up
+  {
+    "fps": 30,                       // nominal sample rate (informational)
+    "video_offset": 0.0,             // video_time = t + video_offset
+    "camera": {                      // optional; drives 原機位疊合
+      "position": [x, y, z], "look_at": [x, y, z], "vfov_deg": 41.4
+    },
+    "players": [                     // order defines the index used in frames/events
+      { "id": "near_yellow", "label": "近場・黃衣", "color": "#facc15" }, ...
+    ],
+    "frames": [
+      {
+        "t": 0.000,                              // seconds, data clock
+        "players": [[x, y], [x, y], null, ...],  // floor position per player, null = missing
+        "ball": [x, y, z] | null,                // null = not in play / not detected
+        "poses": [ [[x,y,z] x 17], ... ]         // optional COCO-17 joints per player
+      }, ...
+    ],
+    "events": [                      // optional; auto-detected from the ball path if absent
+      { "t": 12.40, "type": "hit", "player": 2 },
+      { "t": 12.95, "type": "bounce", "pos": [x, y] }
+    ]
+  }
+-->
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<style>
+  :root {
+    --bg: #070b0a; --panel: #0d1412; --panel-2: #121c19; --line: #1f2d29;
+    --text: #e7efe9; --muted: #8aa39a; --accent: #d9f24a;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+  .btn {
+    height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); font-size: 13px; white-space: nowrap;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .btn:hover { background: #18251f; border-color: #2c3f39; }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn[aria-pressed="true"] { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
+  .btn-icon { width: 36px; padding: 0; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+  .seg .btn { border: 0; border-radius: 0; border-right: 1px solid var(--line); }
+  .seg .btn:last-child { border-right: 0; }
+  .group-label { font-size: 11px; color: var(--muted); letter-spacing: .08em; }
+
+  #scrub { -webkit-appearance: none; appearance: none; width: 100%; height: 22px; background: transparent; position: relative; z-index: 2; }
+  #scrub::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: transparent; }
+  #scrub::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; margin-top: -4px;
+    background: var(--accent); border: 2px solid #111; box-shadow: 0 0 0 3px rgba(217,242,74,.25);
+  }
+  #scrubTrack { position: absolute; left: 0; right: 0; top: 8px; height: 6px; border-radius: 3px; background: #1b2723; overflow: hidden; }
+  #scrubFill { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(217,242,74,.35); }
+  .rally-mark { position: absolute; top: 0; bottom: 0; background: rgba(125,211,252,.35); }
+
+  #videoPanel { transition: width .35s cubic-bezier(.4,0,.2,1), opacity .25s; }
+  #videoPanel.collapsed { width: 0 !important; opacity: 0; border-left-width: 0; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 2px rgba(255,255,255,.12); }
+  #dropHint { transition: opacity .15s; }
+</style>
+</head>
+<body>
+<div class="h-full flex flex-col">
+  <!-- Stage -->
+  <div class="flex-1 min-h-0 flex">
+    <!-- 3D canvas -->
+    <div id="stage" class="relative flex-1 min-w-0">
+      <canvas id="gl" class="absolute inset-0 w-full h-full block outline-none"></canvas>
+
+      <div class="pointer-events-none absolute inset-x-0 top-0 p-4 flex flex-wrap items-start justify-between gap-3"
+           style="background: linear-gradient(to bottom, rgba(7,11,10,.85), rgba(7,11,10,0));">
+        <div>
+          <h1 class="text-xl font-semibold tracking-wide">匹克球 3D 重建 · v2</h1>
+          <p class="text-xs mt-1" style="color: var(--muted)">環繞視角 · 拖曳旋轉 · 滾輪縮放</p>
+          <div id="legend" class="mt-3 inline-flex flex-wrap gap-x-4 gap-y-2 px-3 py-2 rounded-lg text-xs"
+               style="background: rgba(13,20,18,.75); border: 1px solid var(--line);"></div>
+        </div>
+        <div class="pointer-events-auto flex items-center gap-2">
+          <span id="dataBadge" class="text-xs px-2 py-1 rounded-md" style="background: rgba(13,20,18,.75); border: 1px solid var(--line); color: var(--muted)">載入中…</span>
+          <label class="btn cursor-pointer" title="載入 tracking_data.json（或拖曳檔案到頁面）">
+            載入 JSON<input id="fileInput" type="file" accept=".json,application/json" class="hidden" />
+          </label>
+        </div>
+      </div>
+
+      <div id="dropHint" class="pointer-events-none absolute inset-3 rounded-2xl border-2 border-dashed flex items-center justify-center text-lg opacity-0"
+           style="border-color: var(--accent); background: rgba(7,11,10,.6)">放開以載入 tracking_data.json</div>
+    </div>
+
+    <!-- Video -->
+    <aside id="videoPanel" class="relative shrink-0 border-l overflow-hidden flex flex-col" style="width: 40%; background: #000; border-color: var(--line)">
+      <div class="flex-1 min-h-0 flex items-center justify-center">
+        <video id="video" src="match.mp4" preload="auto" playsinline class="w-full h-full object-contain"></video>
+      </div>
+      <div id="videoMsg" class="hidden absolute inset-0 flex items-center justify-center text-sm text-center px-6" style="color: var(--muted)">
+        找不到 match.mp4（請與 index.html 放在同一資料夾）<br />3D 播放將使用內部時鐘。
+      </div>
+      <div class="absolute top-3 left-3 text-xs px-2 py-1 rounded-md" style="background: rgba(0,0,0,.6); color: var(--muted)">原始影片</div>
+      <button id="muteBtn" class="btn btn-icon absolute top-2 right-2" title="靜音 / 取消靜音" aria-label="靜音">🔈</button>
+    </aside>
+  </div>
+
+  <!-- Transport -->
+  <div class="shrink-0 border-t px-4 py-3 flex flex-col gap-3" style="background: var(--panel); border-color: var(--line)">
+    <div class="flex items-center gap-3">
+      <button id="stepBack" class="btn btn-icon" title="上一格 (←)" aria-label="上一格">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="1" y="2" width="2" height="10"/><path d="M13 2 L4.5 7 L13 12 Z"/></svg>
+      </button>
+      <button id="playBtn" class="btn btn-icon" style="width:44px" title="播放 / 暫停 (空白鍵)" aria-label="播放">
+        <svg id="icoPlay" width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><path d="M3 1.5 L12.5 7 L3 12.5 Z"/></svg>
+        <svg id="icoPause" class="hidden" width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2.5" y="1.5" width="3" height="11"/><rect x="8.5" y="1.5" width="3" height="11"/></svg>
+      </button>
+      <button id="stepFwd" class="btn btn-icon" title="下一格 (→)" aria-label="下一格">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><path d="M1 2 L9.5 7 L1 12 Z"/><rect x="11" y="2" width="2" height="10"/></svg>
+      </button>
+      <div class="relative flex-1 min-w-0">
+        <div id="scrubTrack"><div id="rallyMarks"></div><div id="scrubFill"></div></div>
+        <input id="scrub" type="range" min="0" max="1" step="0.001" value="0" aria-label="時間軸" />
+      </div>
+      <div id="readout" class="mono text-sm w-[150px] text-right" style="color: var(--text)">0.00s · #0</div>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2">
+      <div class="flex items-center gap-2">
+        <span class="group-label">速度</span>
+        <div class="seg" id="speedGroup">
+          <button class="btn" data-rate="0.25">1/4x</button>
+          <button class="btn" data-rate="0.5">1/2x</button>
+          <button class="btn" data-rate="1" aria-pressed="true">1x</button>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="group-label">視角</span>
+        <div class="seg" id="camGroup">
+          <button class="btn" data-cam="orbit" aria-pressed="true" title="1">環繞</button>
+          <button class="btn" data-cam="broadcast" title="2">原機位疊合</button>
+          <button class="btn" data-cam="top" title="3">俯視</button>
+          <button class="btn" data-cam="baseline" title="4">底線後方</button>
+          <button class="btn" data-cam="side" title="5">側面</button>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 ml-auto">
+        <button id="trailBtn" class="btn" aria-pressed="true" title="T">軌跡</button>
+        <button id="videoBtn" class="btn" aria-pressed="true" title="V">對照影片</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ───────────────────────────── constants ─────────────────────────────
+const COURT = { halfL: 6.7056, halfW: 3.048, kitchen: 2.1336, line: 0.0508 };
+const NET = { halfSpan: 3.35, hPost: 0.9144, hCenter: 0.8636, depth: 0.76 };
+const VIDEO_FPS = 60000 / 1001;
+const G = 9.81;
+
+// Camera solved from the court lines in match.mp4 (see tools/calibrate_camera.py).
+const CALIBRATED_CAMERA = {
+  position: [-8.8158, -4.7755, 2.1949], look_at: [-3.8801, -0.6206, 0], vfov_deg: 41.375, aspect: 16 / 9,
+};
+
+const DEFAULT_PLAYERS = [
+  { id: 'near_yellow', label: '近場・黃衣', color: '#facc15', team: 0 },
+  { id: 'near_black',  label: '近場・黑衣', color: '#3b4252', team: 0 },
+  { id: 'far_white',   label: '遠場・白衣', color: '#67e8f9', team: 1 },
+  { id: 'far_black',   label: '遠場・黑衣', color: '#fb7185', team: 1 },
+];
+
+// court (x, y, z) → three.js (X, Y, Z): Y is up, court +y maps to -Z.
+const toV = (x, y, z = 0, out = new THREE.Vector3()) => out.set(x, z, -y);
+
+// ───────────────────────────── demo data ─────────────────────────────
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Synthesises rallies with ballistic ball flight, bounces and players that chase
+// each hit point. It emits the same JSON shape as tracking_data.json.
+function generateDemo(duration = 940, fps = 30) {
+  const rnd = mulberry32(20260930);
+  const r = (a, b) => a + (b - a) * rnd();
+  const segs = [];            // ballistic pieces: { t0, t1, p:[x,y,z], v:[vx,vy,vz] }
+  const hits = [], bounces = [], rallies = [];
+  const homeY = [1.5, -1.5, -1.5, 1.5];   // near team faces +x (left = +y); far team faces -x
+  const teamPlayers = [[0, 1], [2, 3]];
+
+  const ballAt = (s, tau) => [s.p[0] + s.v[0] * tau, s.p[1] + s.v[1] * tau, s.p[2] + s.v[2] * tau - 0.5 * G * tau * tau];
+  const launch = (H, L, T) => [(L[0] - H[0]) / T, (L[1] - H[1]) / T, (0.5 * G * T * T - H[2]) / T];
+  const pickHitter = (team, y) => {
+    const [a, b] = teamPlayers[team];
+    return Math.abs(homeY[a] - y) < Math.abs(homeY[b] - y) ? a : b;
+  };
+
+  let t = 3, rallyIdx = 0;
+  while (t < duration - 20) {
+    const ts = t + r(4, 7);
+    let team = Math.floor(rallyIdx / 2) % 2;
+    let side = team === 0 ? -1 : 1;                // x sign of the hitting team's half
+    const serverY = (rallyIdx % 2 ? 1 : -1) * r(0.8, 2.0);
+    let hitter = pickHitter(team, serverY);
+    let H = [side * 7.0, serverY, 0.7];
+    let tHit = ts;
+    const nShots = 3 + Math.floor(rnd() * 11);
+    rallies.push({ ts: tHit - 0.4 });
+    // Toss before the serve.
+    segs.push({ t0: tHit - 0.4, t1: tHit, p: [H[0], H[1], 0.9], v: [0, 0, (H[2] - 0.9 + 0.5 * G * 0.16) / 0.4] });
+
+    for (let k = 0; k < nShots; k++) {
+      hits.push({ t: tHit, player: hitter, pos: H.slice() });
+      const final = k === nShots - 1;
+      const bothUp = k >= 4;
+      let L, T;
+      if (k === 0) {
+        L = [-side * r(3.2, 6.2), -Math.sign(serverY) * r(0.4, 2.7), 0];
+      } else if (bothUp && rnd() < 0.5) {
+        L = [-side * r(0.5, 2.0), r(-2.6, 2.6), 0];          // dink into the kitchen
+      } else {
+        L = [-side * r(2.5, 6.4), r(-2.8, 2.8), 0];
+      }
+      if (final && rnd() < 0.5) L[1] = Math.sign(L[1] || 1) * r(3.2, 3.8); // wide winner / miss
+      const D = Math.hypot(L[0] - H[0], L[1] - H[1]);
+      const dink = Math.abs(L[0]) < 2.1;
+      T = D / (k === 0 ? 11 : dink ? 5.5 : r(9, 15));
+      let v = launch(H, L, T);
+      for (let i = 0; i < 30; i++) {                          // raise the arc until it clears the net
+        const tc = -H[0] / v[0];
+        const zc = H[2] + v[2] * tc - 0.5 * G * tc * tc;
+        if (zc > 1.0) break;
+        T *= 1.06; v = launch(H, L, T);
+      }
+      const s1 = { t0: tHit, t1: tHit + T, p: H.slice(), v };
+      segs.push(s1);
+
+      const rTeam = 1 - team;
+      // Volley: receiver takes it out of the air on the way down, outside the kitchen.
+      if (!final && k >= 2 && rnd() < 0.35) {
+        const a = -0.5 * G, b = v[2], c = H[2] - 1.0;
+        const disc = b * b - 4 * a * c;
+        if (disc > 0) {
+          const tv = (-b - Math.sqrt(disc)) / (2 * a);
+          const P = ballAt(s1, tv);
+          if (tv > 0.25 && tv < T && Math.abs(P[0]) > 2.3 && Math.abs(P[0]) < 7.2 && Math.abs(P[1]) < 3.6) {
+            s1.t1 = tHit + tv;
+            tHit = s1.t1; H = P; team = rTeam; side = -side; hitter = pickHitter(team, P[1]);
+            continue;
+          }
+        }
+      }
+      bounces.push({ t: s1.t1, pos: [L[0], L[1]] });
+      const land = ballAt(s1, T);
+      const vz0 = v[2] - G * T;
+      let bv = [v[0] * 0.78, v[1] * 0.78, -vz0 * 0.62];
+      if (final) {
+        // Nobody reaches it: let the ball bounce out, then end the rally.
+        let tt = s1.t1, p = [land[0], land[1], 0];
+        for (let n = 0; n < 4; n++) {
+          const tf = (2 * bv[2]) / G;
+          segs.push({ t0: tt, t1: tt + tf, p, v: bv });
+          tt += tf; p = [p[0] + bv[0] * tf, p[1] + bv[1] * tf, 0];
+          if (n < 3) bounces.push({ t: tt, pos: [p[0], p[1]] });
+          bv = [bv[0] * 0.8, bv[1] * 0.8, bv[2] * 0.55];
+        }
+        rallies[rallies.length - 1].te = tt;
+        t = tt;
+        break;
+      }
+      const s2 = { t0: s1.t1, t1: 0, p: [land[0], land[1], 0], v: bv };
+      // Take it on the way down at ~0.75 m, or at the apex if it never gets that high.
+      const a = -0.5 * G, b = bv[2], c = -0.75;
+      const disc = b * b - 4 * a * c;
+      const tr = disc > 0 ? (-b - Math.sqrt(disc)) / (2 * a) : bv[2] / G;
+      s2.t1 = s2.t0 + tr;
+      segs.push(s2);
+      tHit = s2.t1; H = ballAt(s2, tr); team = rTeam; side = -side;
+      hitter = pickHitter(team, H[1]);
+    }
+    rallyIdx++;
+  }
+
+  // Players: kinematic chase of either the next hit point or a formation spot.
+  const dt = 1 / fps, n = Math.ceil(duration * fps) + 1;
+  const pos = [[-5.6, 1.5], [-5.6, -1.5], [5.6, -1.5], [5.6, 1.5]];
+  const vel = pos.map(() => [0, 0]);
+  const hitsBy = [0, 1, 2, 3].map(i => hits.filter(h => h.player === i));
+  const ptr = [0, 0, 0, 0];
+  const frames = [];
+  let segI = 0, rI = 0, hitI = 0;
+  const wander = [0, 1, 2, 3].map(() => [r(0, 6.28), r(0, 6.28)]);
+
+  for (let f = 0; f < n; f++) {
+    const time = f * dt;
+    while (segI < segs.length && segs[segI].t1 <= time) segI++;
+    let ball = null;
+    const s = segs[segI];
+    if (s && s.t0 <= time) {
+      const b = ballAt(s, time - s.t0);
+      ball = [+b[0].toFixed(3), +b[1].toFixed(3), +Math.max(0, b[2]).toFixed(3)];
+    }
+    while (rI < rallies.length && rallies[rI].te < time) rI++;
+    const R = rallies[rI];
+    const inRally = R && time >= R.ts - 0.2 && time <= R.te;
+    while (hitI < hits.length && hits[hitI].t <= time) hitI++;
+    const shotsSoFar = inRally ? hits.filter(h => h.t >= R.ts && h.t <= time).length : 0;
+
+    const out = [];
+    for (let i = 0; i < 4; i++) {
+      const fs = i < 2 ? 1 : -1;                    // facing sign: near faces +x
+      while (ptr[i] < hitsBy[i].length && hitsBy[i][ptr[i]].t < time) ptr[i]++;
+      const next = hitsBy[i][ptr[i]];
+      let tx, ty, vmax, tau = 0.45;
+      if (inRally && next && next.t <= R.te + 0.01 && next.t - time < 1.4) {
+        // Stand just left of and behind the contact point so the paddle (right hand) meets it.
+        tx = next.pos[0] - fs * 0.25; ty = next.pos[1] + fs * 0.45;
+        tau = Math.max(0.12, next.t - time); vmax = 6.5;
+      } else if (inRally) {
+        const depth = shotsSoFar >= 3 ? 2.6 : 6.1;
+        const by = ball ? ball[1] * 0.35 : 0;
+        tx = -fs * depth; ty = homeY[i] * 0.95 + by; vmax = 4.2;
+      } else {
+        const w = wander[i];
+        tx = -fs * (5.0 + 0.8 * Math.sin(time * 0.21 + w[0])); ty = homeY[i] * 1.1 + 0.6 * Math.sin(time * 0.17 + w[1]);
+        vmax = 1.3; tau = 1.2;
+      }
+      let dvx = (tx - pos[i][0]) / tau, dvy = (ty - pos[i][1]) / tau;
+      const sp = Math.hypot(dvx, dvy);
+      if (sp > vmax) { dvx *= vmax / sp; dvy *= vmax / sp; }
+      const k = Math.min(1, dt * 9);
+      vel[i][0] += (dvx - vel[i][0]) * k; vel[i][1] += (dvy - vel[i][1]) * k;
+      pos[i][0] += vel[i][0] * dt; pos[i][1] += vel[i][1] * dt;
+      // Keep each team on its own half.
+      pos[i][0] = fs > 0 ? Math.min(pos[i][0], -0.4) : Math.max(pos[i][0], 0.4);
+      out.push([+pos[i][0].toFixed(3), +pos[i][1].toFixed(3)]);
+    }
+    frames.push({ t: +time.toFixed(4), players: out, ball });
+  }
+
+  const events = [
+    ...hits.map(h => ({ t: h.t, type: 'hit', player: h.player })),
+    ...bounces.map(b => ({ t: b.t, type: 'bounce', pos: b.pos })),
+  ].sort((a, b) => a.t - b.t);
+
+  return {
+    fps, video_offset: 0, demo: true,
+    camera: CALIBRATED_CAMERA,
+    players: DEFAULT_PLAYERS,
+    frames, events,
+  };
+}
+
+// ───────────────────────────── data model ─────────────────────────────
+// Converts tracking JSON into typed arrays with gap filling, rallies and events.
+function normalize(json) {
+  if (!json || !Array.isArray(json.frames) || json.frames.length < 2) throw new Error('JSON 缺少 frames 陣列');
+  const frames = json.frames.slice().sort((a, b) => a.t - b.t);
+  const n = frames.length;
+  const meta = (json.players && json.players.length ? json.players : DEFAULT_PLAYERS).map((p, i) => ({
+    id: p.id ?? `p${i}`, label: p.label ?? p.id ?? `球員 ${i + 1}`,
+    color: p.color ?? DEFAULT_PLAYERS[i % 4].color,
+    team: p.team ?? (i < 2 ? 0 : 1),
+  }));
+  const np = meta.length;
+  const T = new Float64Array(n), P = new Float32Array(n * np * 2), B = new Float32Array(n * 3), BV = new Uint8Array(n);
+  const hasPose = frames.some(f => Array.isArray(f.poses));
+  const K = hasPose ? new Float32Array(n * np * 51) : null;
+  const known = new Uint8Array(n * np);
+
+  for (let i = 0; i < n; i++) {
+    const f = frames[i];
+    T[i] = +f.t;
+    for (let p = 0; p < np; p++) {
+      const q = f.players?.[p];
+      if (Array.isArray(q) && Number.isFinite(q[0]) && Number.isFinite(q[1])) {
+        P[(i * np + p) * 2] = q[0]; P[(i * np + p) * 2 + 1] = q[1]; known[i * np + p] = 1;
+      }
+      if (K) {
+        const pose = f.poses?.[p];
+        if (Array.isArray(pose) && pose.length === 17) for (let j = 0; j < 17; j++) {
+          const o = ((i * np + p) * 17 + j) * 3;
+          K[o] = pose[j][0]; K[o + 1] = pose[j][1]; K[o + 2] = pose[j][2];
+        }
+      }
+    }
+    const b = f.ball;
+    if (Array.isArray(b) && b.every(Number.isFinite)) { B[i * 3] = b[0]; B[i * 3 + 1] = b[1]; B[i * 3 + 2] = b[2]; BV[i] = 1; }
+  }
+  // Fill missing player samples by linear interpolation between known neighbours.
+  for (let p = 0; p < np; p++) {
+    let last = -1;
+    for (let i = 0; i <= n; i++) {
+      if (i < n && !known[i * np + p]) continue;
+      const from = last, to = i < n ? i : -1;
+      for (let j = from + 1; j < (to < 0 ? n : to); j++) {
+        const a = from < 0 ? to : from, c = to < 0 ? from : to;
+        if (a < 0) break;
+        const u = a === c ? 0 : (T[j] - T[a]) / (T[c] - T[a]);
+        for (let d = 0; d < 2; d++) P[(j * np + p) * 2 + d] = P[(a * np + p) * 2 + d] * (1 - u) + P[(c * np + p) * 2 + d] * u;
+      }
+      last = i;
+    }
+  }
+  // Cumulative path length per player drives the gait cycle.
+  const dist = new Float32Array(n * np);
+  for (let i = 1; i < n; i++) for (let p = 0; p < np; p++) {
+    const a = ((i - 1) * np + p) * 2, b = (i * np + p) * 2;
+    dist[i * np + p] = dist[(i - 1) * np + p] + Math.hypot(P[b] - P[a], P[b + 1] - P[a + 1]);
+  }
+  // Rallies = runs of frames with a visible ball (short dropouts are bridged).
+  const rallies = [];
+  let start = -1, lastSeen = -1;
+  for (let i = 0; i < n; i++) {
+    if (BV[i]) { if (start < 0) start = i; lastSeen = i; }
+    else if (start >= 0 && T[i] - T[lastSeen] > 0.5) { rallies.push({ t0: T[start], t1: T[lastSeen] }); start = -1; }
+  }
+  if (start >= 0) rallies.push({ t0: T[start], t1: T[lastSeen] });
+
+  let events = Array.isArray(json.events) ? json.events.filter(e => Number.isFinite(e.t)) : detectEvents(T, B, BV, P, np, meta);
+  events = events.slice().sort((a, b) => a.t - b.t);
+
+  const cam = json.camera ?? CALIBRATED_CAMERA;
+  return {
+    n, np, T, P, B, BV, K, dist, meta, rallies, events,
+    hits: events.filter(e => e.type === 'hit'),
+    bounces: events.filter(e => e.type === 'bounce'),
+    offset: +json.video_offset || 0,
+    camera: cam, demo: !!json.demo,
+    duration: T[n - 1],
+  };
+}
+
+// Fallback when the JSON has no events: bounces are ball-height minima near the
+// floor, hits are reversals of the ball's x direction.
+function detectEvents(T, B, BV, P, np, meta) {
+  const ev = [];
+  for (let i = 2; i < T.length - 2; i++) {
+    if (!(BV[i - 2] && BV[i] && BV[i + 2])) continue;
+    const z = B[i * 3 + 2];
+    if (z < 0.15 && z <= B[(i - 1) * 3 + 2] && z < B[(i + 1) * 3 + 2] && B[(i - 2) * 3 + 2] > z + 0.02 && B[(i + 2) * 3 + 2] > z + 0.02) {
+      ev.push({ t: T[i], type: 'bounce', pos: [B[i * 3], B[i * 3 + 1]] });
+    }
+    const vx0 = B[i * 3] - B[(i - 2) * 3], vx1 = B[(i + 2) * 3] - B[i * 3];
+    if (vx0 * vx1 < 0 && Math.abs(vx0) > 0.05 && Math.abs(vx1) > 0.05 && z > 0.15) {
+      let best = 0, bd = Infinity;
+      for (let p = 0; p < np; p++) {
+        const d = Math.hypot(P[(i * np + p) * 2] - B[i * 3], P[(i * np + p) * 2 + 1] - B[i * 3 + 1]);
+        if (d < bd) { bd = d; best = p; }
+      }
+      if (!ev.length || ev[ev.length - 1].type !== 'hit' || T[i] - ev[ev.length - 1].t > 0.2) ev.push({ t: T[i], type: 'hit', player: best });
+    }
+  }
+  return ev;
+}
+
+// Index of the last sample with T <= t, clamped to [0, n-2].
+function seekIndex(D, t) {
+  let lo = 0, hi = D.n - 1;
+  if (t <= D.T[0]) return 0;
+  if (t >= D.T[hi]) return hi - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (D.T[m] <= t) lo = m; else hi = m; }
+  return lo;
+}
+function sampleAt(D, t) {
+  const i = seekIndex(D, t);
+  const span = D.T[i + 1] - D.T[i];
+  const u = span > 0 ? THREE.MathUtils.clamp((t - D.T[i]) / span, 0, 1) : 0;
+  return { i, u };
+}
+function playerXY(D, p, t, out) {
+  const { i, u } = sampleAt(D, t);
+  const a = (i * D.np + p) * 2, b = ((i + 1) * D.np + p) * 2;
+  out[0] = D.P[a] + (D.P[b] - D.P[a]) * u; out[1] = D.P[a + 1] + (D.P[b + 1] - D.P[a + 1]) * u;
+  return out;
+}
+function playerDist(D, p, t) {
+  const { i, u } = sampleAt(D, t);
+  return D.dist[i * D.np + p] * (1 - u) + D.dist[(i + 1) * D.np + p] * u;
+}
+function ballXYZ(D, t, out) {
+  const { i, u } = sampleAt(D, t);
+  if (!D.BV[i] || !D.BV[i + 1]) {
+    // Allow a hold at the edges of a run so the ball doesn't blink out one frame early.
+    const j = D.BV[i] && u < 0.5 ? i : D.BV[i + 1] && u >= 0.5 ? i + 1 : -1;
+    if (j < 0) return false;
+    out[0] = D.B[j * 3]; out[1] = D.B[j * 3 + 1]; out[2] = D.B[j * 3 + 2];
+    return true;
+  }
+  for (let d = 0; d < 3; d++) out[d] = D.B[i * 3 + d] + (D.B[(i + 1) * 3 + d] - D.B[i * 3 + d]) * u;
+  return true;
+}
+function rallyAt(D, t) {
+  for (const r of D.rallies) if (t >= r.t0 - 0.05 && t <= r.t1 + 0.05) return r;
+  return null;
+}
+
+// ───────────────────────────── renderer / scene ─────────────────────────────
+const canvas = document.getElementById('gl');
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#070b0a');
+scene.fog = new THREE.Fog('#070b0a', 32, 70);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 200);
+camera.position.set(-13, 9, 11);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 3;
+controls.maxDistance = 45;
+controls.maxPolarAngle = THREE.MathUtils.degToRad(88);
+controls.target.set(0, 0.4, 0);
+
+scene.add(new THREE.HemisphereLight('#cfe8ff', '#0b2a1a', 0.9));
+const sun = new THREE.DirectionalLight('#ffffff', 2.2);
+sun.position.set(-6, 14, 6);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 9, bottom: -9, near: 1, far: 40 });
+sun.shadow.bias = -0.0004;
+sun.shadow.radius = 4;
+scene.add(sun);
+
+function buildCourt() {
+  const g = new THREE.Group();
+  const surround = new THREE.Mesh(new THREE.PlaneGeometry(26, 16), new THREE.MeshStandardMaterial({ color: '#0f4a2f', roughness: 0.95 }));
+  surround.rotation.x = -Math.PI / 2; surround.receiveShadow = true; g.add(surround);
+  const outer = new THREE.Mesh(new THREE.CircleGeometry(60, 64), new THREE.MeshStandardMaterial({ color: '#08130e', roughness: 1 }));
+  outer.rotation.x = -Math.PI / 2; outer.position.y = -0.01; g.add(outer);
+
+  const courtMat = new THREE.MeshStandardMaterial({ color: '#1e4fd6', roughness: 0.85 });
+  const court = new THREE.Mesh(new THREE.PlaneGeometry(COURT.halfL * 2, COURT.halfW * 2), courtMat);
+  court.rotation.x = -Math.PI / 2; court.position.y = 0.002; court.receiveShadow = true; g.add(court);
+  const kMat = new THREE.MeshStandardMaterial({ color: '#3b82f6', roughness: 0.85 });
+  for (const s of [-1, 1]) {
+    const k = new THREE.Mesh(new THREE.PlaneGeometry(COURT.kitchen, COURT.halfW * 2), kMat);
+    k.rotation.x = -Math.PI / 2; k.position.set(s * COURT.kitchen / 2, 0.003, 0); k.receiveShadow = true; g.add(k);
+  }
+
+  const lineMat = new THREE.MeshStandardMaterial({ color: '#f8fafc', roughness: 0.6, emissive: '#ffffff', emissiveIntensity: 0.08 });
+  const w = COURT.line, L = COURT.halfL, W = COURT.halfW, K = COURT.kitchen;
+  // Line strips measured in court coords: [x0, y0, x1, y1]. Lines sit inside the playing area.
+  const strips = [
+    [-L, W - w / 2, L, W - w / 2], [-L, -W + w / 2, L, -W + w / 2],        // sidelines
+    [-L + w / 2, -W, -L + w / 2, W], [L - w / 2, -W, L - w / 2, W],        // baselines
+    [-K, -W, -K, W], [K, -W, K, W],                                          // non-volley lines
+    [-L, 0, -K, 0], [K, 0, L, 0],                                            // centrelines
+  ];
+  for (const [x0, y0, x1, y1] of strips) {
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(len, w), lineMat);
+    m.rotation.x = -Math.PI / 2;
+    m.rotation.z = Math.atan2(y1 - y0, x1 - x0);
+    toV((x0 + x1) / 2, (y0 + y1) / 2, 0.004, m.position);
+    m.receiveShadow = true;
+    g.add(m);
+  }
+  return g;
+}
+
+function buildNet() {
+  const g = new THREE.Group();
+  const top = y => NET.hCenter + (NET.hPost - NET.hCenter) * Math.min(1, (y / COURT.halfW) ** 2);
+  // Mesh texture: 1-inch-ish cells drawn on a canvas and tiled by world UVs.
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 3;
+  ctx.strokeRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.anisotropy = 8; tex.colorSpace = THREE.SRGBColorSpace;
+
+  const seg = 48, pos = [], uv = [], idx = [], cell = 0.045;
+  for (let i = 0; i <= seg; i++) {
+    const y = -NET.halfSpan + (2 * NET.halfSpan * i) / seg, h = top(y);
+    pos.push(0, h, -y, 0, h - NET.depth, -y);
+    uv.push(y / cell, h / cell, y / cell, (h - NET.depth) / cell);
+    if (i < seg) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  const net = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map: tex, color: '#d7e0dc', transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false,
+  }));
+  g.add(net);
+  const tint = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: '#0b0f0e', transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
+  g.add(tint);
+
+  const pts = [];
+  for (let i = 0; i <= seg; i++) { const y = -NET.halfSpan + (2 * NET.halfSpan * i) / seg; pts.push(toV(0, y, top(y))); }
+  const tape = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 96, 0.028, 8),
+    new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.4, emissive: '#ffffff', emissiveIntensity: 0.15 }));
+  tape.castShadow = true; g.add(tape);
+  const strap = new THREE.Mesh(new THREE.BoxGeometry(0.05, NET.hCenter - 0.02, 0.012), tape.material);
+  strap.position.set(0, (NET.hCenter - 0.02) / 2, 0); g.add(strap);
+
+  const postMat = new THREE.MeshStandardMaterial({ color: '#1c2421', roughness: 0.5, metalness: 0.3 });
+  for (const s of [-1, 1]) {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, NET.hPost + 0.04, 16), postMat);
+    toV(0, s * NET.halfSpan, (NET.hPost + 0.04) / 2, post.position); post.castShadow = true; g.add(post);
+    const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.16, 0.05, 20), postMat);
+    toV(0, s * NET.halfSpan, 0.025, foot.position); g.add(foot);
+  }
+  return g;
+}
+scene.add(buildCourt(), buildNet());
+
+// ───────────────────────────── players ─────────────────────────────
+// COCO-17 joint order.
+const J = { nose: 0, leye: 1, reye: 2, lear: 3, rear: 4, lsho: 5, rsho: 6, lelb: 7, relb: 8, lwri: 9, rwri: 10, lhip: 11, rhip: 12, lknee: 13, rknee: 14, lank: 15, rank: 16 };
+const BONES = [
+  [J.lsho, J.lelb, 0.05], [J.lelb, J.lwri, 0.042], [J.rsho, J.relb, 0.05], [J.relb, J.rwri, 0.042],
+  [J.lhip, J.lknee, 0.07], [J.lknee, J.lank, 0.055], [J.rhip, J.rknee, 0.07], [J.rknee, J.rank, 0.055],
+  [J.lsho, J.rsho, 0.055], [J.lhip, J.rhip, 0.075],
+];
+const JOINT_DOTS = [J.lsho, J.rsho, J.lelb, J.relb, J.lwri, J.rwri, J.lhip, J.rhip, J.lknee, J.rknee, J.lank, J.rank];
+
+const UNIT_CYL = new THREE.CylinderGeometry(1, 1, 1, 12, 1);
+const UNIT_SPH = new THREE.SphereGeometry(1, 16, 12);
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+
+function glowTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  const gr = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gr; ctx.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const GLOW = glowTexture();
+
+class Mannequin {
+  constructor(color) {
+    this.group = new THREE.Group();
+    const col = new THREE.Color(color);
+    const dark = col.getHSL({}).l < 0.3;
+    this.body = new THREE.MeshStandardMaterial({ color: col, roughness: 0.55, emissive: col, emissiveIntensity: dark ? 0.35 : 0.12 });
+    const jointMat = new THREE.MeshStandardMaterial({ color: '#f1f5f4', roughness: 0.4, emissive: '#ffffff', emissiveIntensity: 0.15 });
+    const skin = new THREE.MeshStandardMaterial({ color: dark ? '#9aa4b2' : col.clone().lerp(new THREE.Color('#ffffff'), 0.45), roughness: 0.5 });
+
+    this.bones = BONES.map(([a, b, r]) => {
+      const m = new THREE.Mesh(UNIT_CYL, this.body); m.castShadow = true; m.userData = { a, b, r }; this.group.add(m); return m;
+    });
+    this.torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.15, 1, 6, 14), this.body);
+    this.torso.castShadow = true; this.group.add(this.torso);
+    this.dots = JOINT_DOTS.map(j => {
+      const m = new THREE.Mesh(UNIT_SPH, jointMat); m.scale.setScalar(j >= J.lhip ? 0.065 : 0.05); m.castShadow = true; this.group.add(m); return m;
+    });
+    this.head = new THREE.Mesh(UNIT_SPH, skin); this.head.scale.set(0.105, 0.125, 0.105); this.head.castShadow = true; this.group.add(this.head);
+    this.visor = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2.6), this.body);
+    this.visor.scale.set(0.11, 0.13, 0.11); this.group.add(this.visor);
+
+    this.paddle = new THREE.Group();
+    const face = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.014, 0.24), new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.35, metalness: 0.2 }));
+    face.position.z = 0.2; face.castShadow = true;
+    const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.12, 8), new THREE.MeshStandardMaterial({ color: '#e5e7eb' }));
+    grip.rotation.x = Math.PI / 2; grip.position.z = 0.04;
+    this.paddle.add(face, grip); this.group.add(this.paddle);
+
+    // Floor ring + soft glow disc.
+    this.ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.5, 48), new THREE.MeshBasicMaterial({
+      color: col, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    }));
+    this.ring.rotation.x = -Math.PI / 2;
+    this.halo = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.5), new THREE.MeshBasicMaterial({
+      map: GLOW, color: col, transparent: true, opacity: dark ? 0.55 : 0.4, blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    this.halo.rotation.x = -Math.PI / 2;
+    if (dark) this.ring.material.color.set('#cbd5e1');
+    this.group.add(this.ring, this.halo);
+    this.J = Array.from({ length: 17 }, () => new THREE.Vector3());
+  }
+
+  // pose: Float32Array(51) of court-space joints.
+  apply(pose, fx, fy, time) {
+    const V = this.J;
+    for (let j = 0; j < 17; j++) toV(pose[j * 3], pose[j * 3 + 1], pose[j * 3 + 2], V[j]);
+    const tmp = new THREE.Vector3();
+    for (const m of this.bones) {
+      const { a, b, r } = m.userData;
+      tmp.subVectors(V[b], V[a]);
+      const len = tmp.length();
+      m.position.addVectors(V[a], V[b]).multiplyScalar(0.5);
+      m.quaternion.setFromUnitVectors(Y_AXIS, tmp.divideScalar(len || 1));
+      m.scale.set(r, len, r);
+    }
+    JOINT_DOTS.forEach((j, k) => this.dots[k].position.copy(V[j]));
+
+    const sh = tmp.addVectors(V[J.lsho], V[J.rsho]).multiplyScalar(0.5).clone();
+    const hip = new THREE.Vector3().addVectors(V[J.lhip], V[J.rhip]).multiplyScalar(0.5);
+    const d = new THREE.Vector3().subVectors(sh, hip);
+    const tl = d.length();
+    this.torso.position.addVectors(sh, hip).multiplyScalar(0.5);
+    // Orient the capsule along the spine with its wide axis on the shoulder line.
+    const up = d.divideScalar(tl || 1);
+    const across = new THREE.Vector3().subVectors(V[J.rsho], V[J.lsho]);
+    across.addScaledVector(up, -across.dot(up)).normalize();
+    const back = new THREE.Vector3().crossVectors(across, up);
+    this.torso.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(across, up, back));
+    this.torso.scale.set(1, Math.max(0.1, tl - 0.12), 0.7);
+
+    const earMid = new THREE.Vector3().addVectors(V[J.lear], V[J.rear]).multiplyScalar(0.5);
+    this.head.position.copy(earMid).lerp(V[J.nose], 0.25).add(new THREE.Vector3(0, 0.04, 0));
+    this.visor.position.copy(this.head.position);
+
+    // Paddle continues the right forearm.
+    const w = V[J.rwri], e = V[J.relb];
+    const fore = new THREE.Vector3().subVectors(w, e).normalize();
+    this.paddle.position.copy(w);
+    this.paddle.lookAt(tmp.copy(w).add(fore));
+
+    toV(fx, fy, 0.012, this.ring.position);
+    toV(fx, fy, 0.008, this.halo.position);
+    const pulse = 0.5 + 0.5 * Math.sin(time * 4);
+    this.ring.scale.setScalar(1 + 0.04 * pulse);
+    this.halo.material.opacity = (this.halo.userData.base ??= this.halo.material.opacity) * (0.8 + 0.2 * pulse);
+  }
+}
+
+// Procedural pose from floor track + events, used when the data has no joints.
+const tmpA = [0, 0], tmpB = [0, 0], tmpBall = [0, 0, 0];
+const headingState = [];
+function ik2(root, target, l1, l2, bendDir) {
+  // root/target/bendDir: [x,y,z] court space. Returns the middle joint.
+  const dx = target[0] - root[0], dy = target[1] - root[1], dz = target[2] - root[2];
+  let d = Math.hypot(dx, dy, dz);
+  const maxD = (l1 + l2) * 0.999;
+  const s = d > maxD ? maxD / d : 1;
+  const tx = root[0] + dx * s, ty = root[1] + dy * s, tz = root[2] + dz * s;
+  d = Math.min(d, maxD) || 1e-6;
+  const ux = (tx - root[0]) / d, uy = (ty - root[1]) / d, uz = (tz - root[2]) / d;
+  const a = (l1 * l1 - l2 * l2 + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, l1 * l1 - a * a));
+  // bend direction orthogonalised against the bone axis
+  const k = bendDir[0] * ux + bendDir[1] * uy + bendDir[2] * uz;
+  let nx = bendDir[0] - k * ux, ny = bendDir[1] - k * uy, nz = bendDir[2] - k * uz;
+  const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+  return [[root[0] + ux * a + nx * h, root[1] + uy * a + ny * h, root[2] + uz * a + nz * h], [tx, ty, tz]];
+}
+
+function proceduralPose(D, p, t, out, frameDt) {
+  const [x, y] = playerXY(D, p, t, tmpA);
+  playerXY(D, p, t - 0.06, tmpB);
+  const bx = playerXY(D, p, t + 0.06, [0, 0]);
+  const vx = (bx[0] - tmpB[0]) / 0.12, vy = (bx[1] - tmpB[1]) / 0.12;
+  const speed = Math.hypot(vx, vy);
+  const team = D.meta[p].team ?? (p < 2 ? 0 : 1);
+  const netDir = team === 0 ? 0 : Math.PI;
+
+  // Heading: face the net, turn toward the ball, clamped to ±75°.
+  let want = netDir;
+  if (ballXYZ(D, t, tmpBall)) {
+    const a = Math.atan2(tmpBall[1] - y, tmpBall[0] - x);
+    let dA = Math.atan2(Math.sin(a - netDir), Math.cos(a - netDir));
+    want = netDir + THREE.MathUtils.clamp(dA, -1.3, 1.3) * 0.6;
+  }
+  const hs = headingState[p] ??= { h: want, t };
+  if (Math.abs(t - hs.t) > 0.5 || frameDt === 0) hs.h = want;
+  else {
+    const dA = Math.atan2(Math.sin(want - hs.h), Math.cos(want - hs.h));
+    hs.h += dA * Math.min(1, Math.abs(t - hs.t) * 6);
+  }
+  hs.t = t;
+  const h = hs.h;
+  const fx = Math.cos(h), fy = Math.sin(h);   // forward
+  const rx = fy, ry = -fx;                    // right (court y is left)
+
+  // Swing phase from the nearest hit by this player.
+  let swing = null;
+  let lo = 0, hi = D.hits.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (D.hits[m].t < t - 0.6) lo = m + 1; else hi = m; }
+  for (let k = lo; k < D.hits.length && D.hits[k].t < t + 0.6; k++) {
+    const e = D.hits[k];
+    if (e.player === p && (!swing || Math.abs(e.t - t) < Math.abs(swing.t - t))) swing = e;
+  }
+  let s = 0, backhand = false;
+  if (swing) {
+    s = THREE.MathUtils.clamp((t - swing.t) / 0.45, -1, 1);
+    const P = ballXYZ(D, swing.t, tmpBall) ? tmpBall : [x + fx, y + fy, 1];
+    backhand = ((P[0] - x) * rx + (P[1] - y) * ry) < -0.05;
+  }
+
+  const crouch = 0.07 + Math.min(0.08, speed * 0.02) + (swing ? 0.06 * (1 - Math.abs(s)) : 0);
+  const phase = (playerDist(D, p, t) / 1.25) * Math.PI * 2;
+  const stride = Math.min(0.32, speed * 0.16);
+  const lift = Math.min(1, speed / 1.5) * 0.13;
+  const bob = Math.abs(Math.sin(phase)) * 0.025 * Math.min(1, speed);
+  const mvx = speed > 0.05 ? vx / speed : fx, mvy = speed > 0.05 ? vy / speed : fy;
+
+  // Upper-body twist with the swing.
+  let armAng;
+  if (!swing) armAng = -0.35;
+  else if (s < -0.35) armAng = THREE.MathUtils.lerp(-0.35, backhand ? 1.8 : -1.9, (s + 1) / 0.65);
+  else if (s < 0) armAng = THREE.MathUtils.lerp(backhand ? 1.8 : -1.9, backhand ? 0.1 : -0.15, (s + 0.35) / 0.35);
+  else armAng = THREE.MathUtils.lerp(backhand ? 0.1 : -0.15, backhand ? -1.2 : 1.1, Math.min(1, s / 0.6));
+  const twist = swing ? THREE.MathUtils.clamp(armAng * 0.35, -0.6, 0.6) : 0;
+  const tcx = Math.cos(h + twist), tcy = Math.sin(h + twist);
+  const trx = tcy, try_ = -tcx;
+
+  const L = (a, b, c, fX = fx, fY = fy, rX = rx, rY = ry) => [x + a * fX + b * rX, y + a * fY + b * rY, c];
+  const hipZ = 0.95 - crouch + bob, shZ = 1.45 - crouch * 0.8 + bob;
+  const lhip = L(0, -0.11, hipZ), rhip = L(0, 0.11, hipZ);
+  const lsho = L(0.02, -0.19, shZ, tcx, tcy, trx, try_), rsho = L(0.02, 0.19, shZ, tcx, tcy, trx, try_);
+
+  // Feet: gait along motion direction plus a wide athletic base.
+  const stance = 0.17 + (swing ? 0.05 : 0);
+  const sw = Math.sin(phase);
+  const foot = (side, sign) => {
+    const off = sign * stride * sw;
+    const up = Math.max(0, sign * Math.cos(phase)) * lift;
+    return [x + side * stance * rx + off * mvx, y + side * stance * ry + off * mvy, 0.08 + up];
+  };
+  const lank = foot(-1, 1), rank = foot(1, -1);
+  const fwd = [fx, fy, 0.25];
+  const [lknee] = ik2(lhip, lank, 0.47, 0.46, fwd), [rknee] = ik2(rhip, rank, 0.47, 0.46, fwd);
+
+  // Hands. Paddle hand follows the swing arc; free hand counterbalances.
+  const reach = 0.52;
+  const wz = shZ - 0.35 + (swing ? 0.08 * Math.cos(s * 2) : 0);
+  const aax = Math.cos(h + armAng), aay = Math.sin(h + armAng);
+  let rwT = swing
+    ? [rsho[0] * 0.5 + (x + fx * 0.05) * 0.5 + aax * reach, rsho[1] * 0.5 + (y + fy * 0.05) * 0.5 + aay * reach, wz]
+    : L(0.34 - stride * sw * 0.15, 0.16, shZ - 0.42);
+  const lwT = swing ? L(0.28, -0.3, shZ - 0.35) : L(0.3 + stride * sw * 0.2, -0.2, shZ - 0.45);
+  const elbowBend = [-fx * 0.6 + 0, -fy * 0.6, -1];
+  const [relb, rwri] = ik2(rsho, rwT, 0.3, 0.28, elbowBend);
+  const [lelb, lwri] = ik2(lsho, lwT, 0.3, 0.28, elbowBend);
+
+  const headZ = shZ + 0.2;
+  const nose = L(0.1, 0, headZ, tcx * 0.3 + fx * 0.7, tcy * 0.3 + fy * 0.7, rx, ry);
+  const leye = L(0.09, -0.03, headZ + 0.03), reye = L(0.09, 0.03, headZ + 0.03);
+  const lear = L(0, -0.075, headZ), rear = L(0, 0.075, headZ);
+
+  const js = [nose, leye, reye, lear, rear, lsho, rsho, lelb, relb, lwri, rwri, lhip, rhip, lknee, rknee, lank, rank];
+  for (let j = 0; j < 17; j++) { out[j * 3] = js[j][0]; out[j * 3 + 1] = js[j][1]; out[j * 3 + 2] = js[j][2]; }
+  return out;
+}
+
+// ───────────────────────────── trails ─────────────────────────────
+const TRAIL_SECONDS = 3, TRAIL_N = 90;
+class Trail {
+  constructor(color) {
+    const n = TRAIL_N + 1;
+    this.pos = new Float32Array(n * 2 * 3);
+    this.col = new Float32Array(n * 2 * 4);
+    const idx = [];
+    for (let i = 0; i < TRAIL_N; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+    this.geo = new THREE.BufferGeometry();
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
+    this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 4).setUsage(THREE.DynamicDrawUsage));
+    this.geo.setIndex(idx);
+    this.color = new THREE.Color(color);
+    if (this.color.getHSL({}).l < 0.3) this.color.set('#cbd5e1');
+    this.mesh = new THREE.Mesh(this.geo, new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    }));
+    this.mesh.frustumCulled = false;
+    this.pts = Array.from({ length: n }, () => [0, 0]);
+  }
+  update(D, p, t) {
+    const n = TRAIL_N + 1, t0 = Math.max(D.T[0], t - TRAIL_SECONDS);
+    for (let i = 0; i < n; i++) playerXY(D, p, t - (t - t0) * (i / TRAIL_N), this.pts[i]);
+    for (let i = 0; i < n; i++) {
+      const a = this.pts[Math.max(0, i - 1)], b = this.pts[Math.min(n - 1, i + 1)];
+      let dx = b[0] - a[0], dy = b[1] - a[1];
+      const l = Math.hypot(dx, dy);
+      if (l < 1e-5) { dx = 1; dy = 0; } else { dx /= l; dy /= l; }
+      const k = 1 - i / TRAIL_N;
+      const w = 0.02 + 0.09 * k;
+      const [x, y] = this.pts[i];
+      const o = i * 6;
+      this.pos[o] = x - dy * w; this.pos[o + 1] = 0.01; this.pos[o + 2] = -(y + dx * w);
+      this.pos[o + 3] = x + dy * w; this.pos[o + 4] = 0.01; this.pos[o + 5] = -(y - dx * w);
+      const al = Math.pow(k, 1.6) * 0.85;
+      for (let s = 0; s < 2; s++) {
+        const c = i * 8 + s * 4;
+        this.col[c] = this.color.r; this.col[c + 1] = this.color.g; this.col[c + 2] = this.color.b; this.col[c + 3] = al;
+      }
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.color.needsUpdate = true;
+  }
+}
+
+// ───────────────────────────── ball ─────────────────────────────
+const ball = new THREE.Mesh(new THREE.SphereGeometry(0.065, 24, 16), new THREE.MeshStandardMaterial({
+  color: '#e8ff3a', emissive: '#d4f000', emissiveIntensity: 0.9, roughness: 0.35,
+}));
+ball.castShadow = true;
+const ballGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: GLOW, color: '#eaff5a', transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false }));
+ballGlow.scale.setScalar(0.5);
+const ballShadow = new THREE.Mesh(new THREE.CircleGeometry(0.09, 24), new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: 0.45, depthWrite: false }));
+ballShadow.rotation.x = -Math.PI / 2;
+const ballDrop = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+  new THREE.LineBasicMaterial({ color: '#eaff5a', transparent: true, opacity: 0.25 }));
+scene.add(ball, ballGlow, ballShadow, ballDrop);
+
+// Current shot arc: tube through the sampled path, bright behind the ball, faint ahead.
+class PolyCurve extends THREE.Curve {
+  constructor(points) { super(); this.p = points; }
+  getPoint(u, out = new THREE.Vector3()) {
+    const f = u * (this.p.length - 1), i = Math.min(this.p.length - 2, Math.floor(f));
+    return out.lerpVectors(this.p[i], this.p[i + 1], f - i);
+  }
+}
+const arcMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+let arcMesh = null, arcKey = '', arcTimes = null;
+const ARC_RADIAL = 6;
+function setArc(D, t0, t1) {
+  const key = `${t0.toFixed(3)}:${t1.toFixed(3)}`;
+  if (key === arcKey) return;
+  arcKey = key;
+  if (arcMesh) { scene.remove(arcMesh); arcMesh.geometry.dispose(); arcMesh = null; }
+  const pts = [], times = [];
+  const steps = Math.max(8, Math.min(240, Math.round((t1 - t0) * 90)));
+  for (let i = 0; i <= steps; i++) {
+    const tt = t0 + (t1 - t0) * (i / steps);
+    if (ballXYZ(D, tt, tmpBall)) { pts.push(toV(tmpBall[0], tmpBall[1], Math.max(0.03, tmpBall[2]))); times.push(tt); }
+  }
+  if (pts.length < 3) return;
+  const geo = new THREE.TubeGeometry(new PolyCurve(pts), pts.length - 1, 0.014, ARC_RADIAL, false);
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(geo.attributes.position.count * 4), 4));
+  arcMesh = new THREE.Mesh(geo, arcMat);
+  arcMesh.frustumCulled = false;
+  arcTimes = times;
+  scene.add(arcMesh);
+}
+function colorArc(t) {
+  if (!arcMesh) return;
+  const col = arcMesh.geometry.attributes.color, ring = ARC_RADIAL + 1, segs = arcTimes.length;
+  for (let i = 0; i < segs; i++) {
+    const past = arcTimes[i] <= t;
+    const a = past ? 0.95 : 0.22;
+    const r = past ? 0.92 : 0.8, g = past ? 1 : 0.95, b = past ? 0.3 : 0.6;
+    for (let j = 0; j < ring; j++) {
+      const o = (i * ring + j) * 4;
+      if (o + 3 >= col.array.length) break;
+      col.array[o] = r; col.array[o + 1] = g; col.array[o + 2] = b; col.array[o + 3] = a;
+    }
+  }
+  col.needsUpdate = true;
+}
+
+// Bounce markers for the current rally.
+const bounceMarks = Array.from({ length: 16 }, () => {
+  const m = new THREE.Mesh(new THREE.RingGeometry(0.1, 0.16, 32), new THREE.MeshBasicMaterial({
+    color: '#eaff5a', transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+  }));
+  m.rotation.x = -Math.PI / 2; m.visible = false; scene.add(m); return m;
+});
+
+// ───────────────────────────── app state ─────────────────────────────
+let D = null;
+let actors = [];
+const poseBuf = new Float32Array(51);
+const video = document.getElementById('video');
+let videoOK = true;
+let trailsOn = true;
+
+function setData(json, sourceLabel) {
+  D = normalize(json);
+  for (const a of actors) { scene.remove(a.man.group, a.trail.mesh); }
+  headingState.length = 0;
+  actors = D.meta.map(m => {
+    const man = new Mannequin(m.color), trail = new Trail(m.color);
+    scene.add(man.group, trail.mesh);
+    trail.mesh.visible = trailsOn;
+    return { man, trail };
+  });
+  arcKey = '';
+  const legend = document.getElementById('legend');
+  legend.innerHTML = D.meta.map(m =>
+    `<span class="inline-flex items-center gap-2"><span class="legend-dot" style="background:${m.color}"></span>${m.label}</span>`).join('');
+  const badge = document.getElementById('dataBadge');
+  badge.textContent = sourceLabel;
+  badge.style.color = D.demo ? '#fbbf24' : 'var(--accent)';
+  badge.title = D.demo ? '示範資料為程式產生，球員動作與影片內容不對應' : '';
+  buildRallyMarks();
+  if (camMode === 'broadcast') goCam('broadcast', true);
+}
+
+// ───────────────────────────── clock ─────────────────────────────
+// Media clock: video.currentTime, refined with requestVideoFrameCallback so the
+// scene advances smoothly between decoded frames. Falls back to a free-running
+// clock when match.mp4 is missing.
+const clock = {
+  rate: 1, freeT: 0, freePlaying: false, freeWall: 0,
+  vfMedia: 0, vfWall: 0,
+  get duration() { return videoOK && Number.isFinite(video.duration) ? video.duration : (D ? D.duration + D.offset : 0); },
+  get playing() { return videoOK ? !video.paused && !video.ended : this.freePlaying; },
+  now() {
+    if (!videoOK) return this.freePlaying ? this.freeT + (performance.now() - this.freeWall) / 1000 * this.rate : this.freeT;
+    const ct = video.currentTime;
+    if (video.paused || video.seeking) return ct;
+    const est = this.vfMedia + (performance.now() - this.vfWall) / 1000 * video.playbackRate;
+    return Math.abs(est - ct) < 0.15 ? est : ct;
+  },
+  play() {
+    if (videoOK) return video.play().catch(() => {});
+    this.freeWall = performance.now(); this.freePlaying = true;
+  },
+  pause() {
+    if (videoOK) return video.pause();
+    this.freeT = this.now(); this.freePlaying = false;
+  },
+  seek(t) {
+    t = THREE.MathUtils.clamp(t, 0, this.duration || 0);
+    if (videoOK) { video.currentTime = t; this.vfMedia = t; this.vfWall = performance.now(); }
+    else { this.freeT = t; this.freeWall = performance.now(); }
+  },
+  setRate(r) {
+    if (!videoOK) this.freeT = this.now();
+    this.freeWall = performance.now();
+    this.rate = r; video.playbackRate = r;
+  },
+};
+if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+  const onVF = (now, meta) => { clock.vfMedia = meta.mediaTime; clock.vfWall = now; video.requestVideoFrameCallback(onVF); };
+  video.requestVideoFrameCallback(onVF);
+}
+video.addEventListener('error', () => {
+  videoOK = false;
+  document.getElementById('videoMsg').classList.remove('hidden');
+  updatePlayIcon(); buildRallyMarks();
+});
+video.addEventListener('loadedmetadata', buildRallyMarks);
+for (const ev of ['play', 'pause', 'ended']) video.addEventListener(ev, updatePlayIcon);
+
+// ───────────────────────────── camera presets ─────────────────────────────
+let camMode = 'orbit';
+let tween = null;
+const L = COURT.halfL;
+
+function fitDistance(w, h, fovDeg, aspect) {
+  const v = THREE.MathUtils.degToRad(fovDeg);
+  const hd = (h / 2) / Math.tan(v / 2);
+  const wd = (w / 2) / (Math.tan(v / 2) * aspect);
+  return Math.max(hd, wd);
+}
+function presetView(mode) {
+  const aspect = camera.aspect;
+  switch (mode) {
+    case 'broadcast': {
+      const c = D?.camera ?? CALIBRATED_CAMERA;
+      const vf = c.vfov_deg ?? 41.4, va = c.aspect ?? 16 / 9;
+      // Keep the calibrated horizontal field of view when the canvas is narrower than the video.
+      let fov = vf;
+      if (aspect < va) fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(vf) / 2) * va / aspect));
+      return { pos: toV(...c.position), target: toV(...c.look_at), fov };
+    }
+    case 'top': {
+      const fov = 40, d = fitDistance(2 * L + 2.4, 2 * COURT.halfW + 2.4, fov, aspect);
+      return { pos: new THREE.Vector3(0, d, 0.001), target: new THREE.Vector3(0, 0, 0), fov };
+    }
+    case 'baseline': return { pos: new THREE.Vector3(-L - 5.2, 3.3, 0), target: new THREE.Vector3(1.5, 0.6, 0), fov: 50 };
+    case 'side': {
+      const fov = 42, d = Math.max(11, fitDistance(2 * L + 3, 5, fov, aspect) * 0.95);
+      return { pos: new THREE.Vector3(0, 4.2, d), target: new THREE.Vector3(0, 0.5, 0), fov };
+    }
+    default: return { pos: new THREE.Vector3(-12.5, 8.5, 10.5), target: new THREE.Vector3(0, 0.4, 0), fov: 45 };
+  }
+}
+function goCam(mode, instant = false) {
+  camMode = mode;
+  document.querySelectorAll('#camGroup .btn').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.cam === mode)));
+  const to = presetView(mode);
+  if (instant) {
+    camera.position.copy(to.pos); controls.target.copy(to.target); camera.fov = to.fov; camera.updateProjectionMatrix();
+    tween = null; controls.enabled = true; controls.update(); return;
+  }
+  tween = { t: 0, dur: 0.9, from: { pos: camera.position.clone(), target: controls.target.clone(), fov: camera.fov }, to };
+  controls.enabled = false;
+}
+function stepTween(dt) {
+  if (!tween) return;
+  tween.t = Math.min(1, tween.t + dt / tween.dur);
+  const k = tween.t < 0.5 ? 4 * tween.t ** 3 : 1 - (-2 * tween.t + 2) ** 3 / 2;
+  // Move around the target on an arc rather than cutting through the court.
+  const a = tween.from, b = tween.to;
+  const tgt = new THREE.Vector3().lerpVectors(a.target, b.target, k);
+  const ra = a.pos.clone().sub(a.target), rb = b.pos.clone().sub(b.target);
+  const sa = new THREE.Spherical().setFromVector3(ra), sb = new THREE.Spherical().setFromVector3(rb);
+  let dTheta = sb.theta - sa.theta;
+  dTheta = Math.atan2(Math.sin(dTheta), Math.cos(dTheta));
+  const s = new THREE.Spherical(
+    THREE.MathUtils.lerp(sa.radius, sb.radius, k),
+    THREE.MathUtils.lerp(sa.phi, sb.phi, k),
+    sa.theta + dTheta * k,
+  );
+  camera.position.setFromSpherical(s).add(tgt);
+  controls.target.copy(tgt);
+  camera.fov = THREE.MathUtils.lerp(a.fov, b.fov, k);
+  camera.updateProjectionMatrix();
+  camera.lookAt(tgt);
+  if (tween.t >= 1) {
+    camera.position.copy(b.pos); controls.target.copy(b.target);
+    tween = null; controls.enabled = true; controls.update();
+  }
+}
+// Dragging from any preset hands control back to orbit mode.
+controls.addEventListener('start', () => {
+  if (camMode !== 'orbit' && !tween) {
+    camMode = 'orbit';
+    document.querySelectorAll('#camGroup .btn').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.cam === 'orbit')));
+    if (Math.abs(camera.fov - 45) > 0.5) { camera.fov = 45; camera.updateProjectionMatrix(); }
+  }
+});
+
+// ───────────────────────────── resize ─────────────────────────────
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  if (camMode !== 'orbit' && !tween) {
+    const v = presetView(camMode);
+    camera.fov = v.fov;
+    if (camMode === 'top' || camMode === 'side') { camera.position.copy(v.pos); controls.target.copy(v.target); }
+  }
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(stage);
+
+// ───────────────────────────── transport UI ─────────────────────────────
+const scrub = document.getElementById('scrub');
+const scrubFill = document.getElementById('scrubFill');
+const readout = document.getElementById('readout');
+let scrubbing = false;
+
+function updatePlayIcon() {
+  const p = clock.playing;
+  document.getElementById('icoPlay').classList.toggle('hidden', p);
+  document.getElementById('icoPause').classList.toggle('hidden', !p);
+  document.getElementById('playBtn').setAttribute('aria-label', p ? '暫停' : '播放');
+}
+function togglePlay() { clock.playing ? clock.pause() : clock.play(); setTimeout(updatePlayIcon, 0); }
+function step(dir) {
+  clock.pause();
+  const fps = videoOK ? VIDEO_FPS : 30;
+  const f = Math.round(clock.now() * fps) + dir;
+  clock.seek(f / fps + 0.0005);
+  updatePlayIcon();
+}
+function buildRallyMarks() {
+  const box = document.getElementById('rallyMarks');
+  const dur = clock.duration;
+  if (!D || !dur) { box.innerHTML = ''; return; }
+  box.innerHTML = D.rallies.map(r => {
+    const a = (r.t0 + D.offset) / dur * 100, b = (r.t1 + D.offset) / dur * 100;
+    return `<div class="rally-mark" style="left:${a}%;width:${Math.max(0.08, b - a)}%"></div>`;
+  }).join('');
+}
+
+document.getElementById('playBtn').onclick = togglePlay;
+document.getElementById('stepBack').onclick = () => step(-1);
+document.getElementById('stepFwd').onclick = () => step(1);
+scrub.addEventListener('pointerdown', () => { scrubbing = true; });
+window.addEventListener('pointerup', () => { scrubbing = false; });
+scrub.addEventListener('input', () => clock.seek(+scrub.value * clock.duration));
+
+document.querySelectorAll('#speedGroup .btn').forEach(b => b.onclick = () => {
+  clock.setRate(+b.dataset.rate);
+  document.querySelectorAll('#speedGroup .btn').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+});
+document.querySelectorAll('#camGroup .btn').forEach(b => b.onclick = () => goCam(b.dataset.cam));
+
+const trailBtn = document.getElementById('trailBtn');
+function setTrails(on) {
+  trailsOn = on; trailBtn.setAttribute('aria-pressed', String(on));
+  for (const a of actors) a.trail.mesh.visible = on;
+}
+trailBtn.onclick = () => setTrails(!trailsOn);
+
+const videoBtn = document.getElementById('videoBtn');
+const videoPanel = document.getElementById('videoPanel');
+function setVideoPanel(open) {
+  videoPanel.classList.toggle('collapsed', !open);
+  videoBtn.setAttribute('aria-pressed', String(open));
+}
+videoBtn.onclick = () => setVideoPanel(videoPanel.classList.contains('collapsed'));
+
+const muteBtn = document.getElementById('muteBtn');
+video.muted = false;
+muteBtn.onclick = () => { video.muted = !video.muted; muteBtn.textContent = video.muted ? '🔇' : '🔈'; };
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  const cams = ['orbit', 'broadcast', 'top', 'baseline', 'side'];
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); step(-1); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); step(1); }
+  else if (e.key >= '1' && e.key <= '5') goCam(cams[+e.key - 1]);
+  else if (e.key === 't' || e.key === 'T') setTrails(!trailsOn);
+  else if (e.key === 'v' || e.key === 'V') setVideoPanel(videoPanel.classList.contains('collapsed'));
+});
+
+// ───────────────────────────── data loading ─────────────────────────────
+async function loadFile(file) {
+  try {
+    const json = JSON.parse(await file.text());
+    setData(json, `資料：${file.name}`);
+  } catch (err) {
+    alert(`無法載入 ${file.name}：${err.message}`);
+  }
+}
+document.getElementById('fileInput').addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); e.target.value = ''; });
+const dropHint = document.getElementById('dropHint');
+window.addEventListener('dragover', e => { e.preventDefault(); dropHint.style.opacity = 1; });
+window.addEventListener('dragleave', e => { if (!e.relatedTarget) dropHint.style.opacity = 0; });
+window.addEventListener('drop', e => {
+  e.preventDefault(); dropHint.style.opacity = 0;
+  const f = [...e.dataTransfer.files].find(f => f.name.endsWith('.json'));
+  if (f) loadFile(f);
+});
+
+async function boot() {
+  try {
+    const res = await fetch('tracking_data.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(res.status);
+    setData(await res.json(), '資料：tracking_data.json');
+  } catch {
+    setData(generateDemo(), '示範資料（非真實追蹤）');
+  }
+}
+
+// ───────────────────────────── frame loop ─────────────────────────────
+let lastWall = performance.now(), lastT = -1;
+const tmpV = new THREE.Vector3();
+
+function frame(wall) {
+  const dt = Math.min(0.1, (wall - lastWall) / 1000);
+  lastWall = wall;
+  stepTween(dt);
+  if (!tween) controls.update();
+
+  const vt = clock.now();
+  if (D) {
+    const t = vt - D.offset;
+    const frameDt = lastT < 0 ? 0 : t - lastT;
+    lastT = t;
+    const dur = clock.duration || 1;
+    if (!scrubbing) scrub.value = String(vt / dur);
+    scrubFill.style.width = `${(vt / dur) * 100}%`;
+    const fi = seekIndex(D, t) + (t >= D.T[D.n - 1] ? 1 : 0);
+    readout.textContent = `${vt.toFixed(2)}s · #${Math.max(0, fi)}`;
+
+    for (let p = 0; p < actors.length; p++) {
+      const [x, y] = playerXY(D, p, t, tmpA);
+      let pose;
+      if (D.K) {
+        const { i, u } = sampleAt(D, t);
+        const a = (i * D.np + p) * 51, b = ((i + 1) * D.np + p) * 51;
+        for (let k = 0; k < 51; k++) poseBuf[k] = D.K[a + k] + (D.K[b + k] - D.K[a + k]) * u;
+        pose = poseBuf;
+        if (!poseBuf.some(v => v !== 0)) pose = proceduralPose(D, p, t, poseBuf, frameDt);
+      } else pose = proceduralPose(D, p, t, poseBuf, frameDt);
+      actors[p].man.apply(pose, x, y, wall / 1000);
+      if (trailsOn) actors[p].trail.update(D, p, t);
+    }
+
+    const visible = ballXYZ(D, t, tmpBall);
+    ball.visible = ballGlow.visible = ballShadow.visible = ballDrop.visible = visible;
+    const rally = visible ? rallyAt(D, t) : null;
+    if (visible) {
+      toV(tmpBall[0], tmpBall[1], Math.max(0.065, tmpBall[2]), ball.position);
+      ballGlow.position.copy(ball.position);
+      toV(tmpBall[0], tmpBall[1], 0.006, ballShadow.position);
+      const hgt = tmpBall[2];
+      ballShadow.scale.setScalar(1 + hgt * 0.35);
+      ballShadow.material.opacity = 0.5 / (1 + hgt * 0.8);
+      const lp = ballDrop.geometry.attributes.position;
+      lp.setXYZ(0, ball.position.x, ball.position.y, ball.position.z);
+      lp.setXYZ(1, ball.position.x, 0.006, ball.position.z);
+      lp.needsUpdate = true;
+
+      // Shot window: previous hit → next hit, bounded by the rally.
+      let t0 = rally ? rally.t0 : t - 1, t1 = rally ? rally.t1 : t + 1;
+      for (const h of D.hits) {
+        if (h.t <= t && h.t >= t0) t0 = h.t;
+        if (h.t > t) { if (h.t < t1) t1 = h.t; break; }
+      }
+      setArc(D, t0, t1);
+      colorArc(t);
+    }
+    if (arcMesh) arcMesh.visible = visible;
+
+    // Bounce markers from the start of the rally up to the current shot's end.
+    let m = 0;
+    if (rally) {
+      for (const b of D.bounces) {
+        if (b.t < rally.t0 - 0.05) continue;
+        if (b.t > rally.t1 + 0.05 || m >= bounceMarks.length) break;
+        const pos = b.pos ?? (ballXYZ(D, b.t, tmpBall) ? [tmpBall[0], tmpBall[1]] : null);
+        if (!pos) continue;
+        const mk = bounceMarks[m++];
+        const age = t - b.t;
+        mk.visible = true;
+        toV(pos[0], pos[1], 0.014, mk.position);
+        if (age < 0) { mk.material.opacity = 0.18; mk.scale.setScalar(0.8); }
+        else {
+          const pop = Math.min(1, age / 0.25);
+          mk.material.opacity = 0.95 - Math.min(0.55, age * 0.12);
+          mk.scale.setScalar(0.6 + 0.9 * pop);
+        }
+      }
+    }
+    for (; m < bounceMarks.length; m++) bounceMarks[m].visible = false;
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+// Deep links: #cam=broadcast&t=120.5&panel=0&trails=0
+function applyHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('panel') === '0') setVideoPanel(false);
+  if (h.get('trails') === '0') setTrails(false);
+  resize();
+  const cam = h.get('cam');
+  goCam(['orbit', 'broadcast', 'top', 'baseline', 'side'].includes(cam) ? cam : 'orbit', true);
+  const t = parseFloat(h.get('t'));
+  if (Number.isFinite(t)) {
+    if (videoOK && video.readyState < 1) video.addEventListener('loadedmetadata', () => clock.seek(t), { once: true });
+    else clock.seek(t);
+  }
+}
+
+resize();
+updatePlayIcon();
+boot().then(() => { applyHash(); requestAnimationFrame(frame); });
+</script>
+</body>
+</html>
