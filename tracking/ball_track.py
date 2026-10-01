@@ -199,6 +199,7 @@ def main():
     xy = np.full((n, 2), np.nan)
     tid = np.full(n, -1)
     observed = np.zeros(n, bool)
+    area = np.full(n, np.nan, np.float32)
     for k, t in enumerate(chosen):
         F = np.array([p[0] for p in t.pts]) - f0
         P = np.array([[p[1], p[2]] for p in t.pts])
@@ -207,8 +208,13 @@ def main():
         xy[full, 1] = np.interp(full, F, P[:, 1])
         tid[full] = k
         observed[F] = True
+        area[F] = cand[[p[3] for p in t.pts], 3]
     out = Path(a.out)
-    np.savez_compressed(out, fps=fps, f0=f0, xy=xy, track=tid, observed=observed)
+    raw = np.full((n, 2), np.nan)
+    for t in chosen:
+        F = np.array([p[0] for p in t.pts]) - f0
+        raw[F] = [[p[1], p[2]] for p in t.pts]
+    np.savez_compressed(out, fps=fps, f0=f0, xy=xy, raw=raw, track=tid, observed=observed, area=area)
     print(f"wrote {out}: ball in {np.isfinite(xy[:, 0]).mean() * 100:.1f}% of frames "
           f"({observed.mean() * 100:.1f}% directly observed), median track {np.median([len(t.pts) for t in chosen]):.0f} obs")
 

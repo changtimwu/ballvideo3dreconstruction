@@ -10,9 +10,9 @@ the video's clock.
 - `prompts.md`: the original spec.
 
 > **Status (milestone 1 of [#1](https://github.com/changtimwu/ballvideo3dreconstruction/issues/1)):**
-> `tracking_data.json` holds **real player floor positions** for the whole match.
-> Milestone 2 (2D ball track in the video) is done, but its output isn't in the viewer yet:
-> that needs the 3D ball from milestone 3. Body poses are still procedural. Without
+> `tracking_data.json` holds **real player floor positions, the 3D ball, and hit/bounce
+> events** for the whole match (milestones 1–3). Body poses are still procedural
+> (milestone 4). Without
 > `tracking_data.json`, the viewer falls back to a generated demo dataset. The badge in the
 > top-right corner shows which data is loaded.
 
@@ -128,6 +128,9 @@ uv run python -m tracking.track                       # stage 3: identities + sm
 uv run python -m tracking.export                      # → tracking_data.json
 uv run python -m tracking.ball_detect match.mp4       # ball B1: colour+motion candidates, 60 fps, ~5 min
 uv run python -m tracking.ball_track                  # ball B2: link into 2D flight tracks → data/ball2d.npz
+uv run python -m tracking.ball3d                      # ball B3: 3D flight fits + hits/bounces, ~2 min
+uv run python -m tracking.export                      # re-run to include the ball and events
+uv run python -m tracking.ball_check                  # physical sanity numbers for the 3D ball
 uv run python -m tracking.overlay match.mp4 --start 290 --end 320   # QA video → data/overlay.mp4
 ```
 
@@ -144,6 +147,8 @@ files go to `data/` (gitignored).
 | `overlay` | Draws the exported positions back onto the video, to check alignment and identities. |
 | `ball_detect` | Every frame: neon-green colour mask, minus a learned static mask (net-post sticker, logos), keeping only moving blobs. Records size, shape, hue/saturation and distance to the nearest ankle. |
 | `ball_track` | Links candidates into flight tracks (seed by consistent velocity, extend with a quadratic prediction, allow short occlusion gaps). Keeps tracks that are ball-coloured (hue ≥ 40, sat ≥ 165; this rejects shoe stripes and a paddle grip), moving, and whose size-implied depth puts them over this court (rejects neighbouring-court balls). Then picks one track per frame. |
+| `ball3d` | Lifts the 2D track to 3D. Between contacts the ball is ballistic, so each flight segment is 6 unknowns (start position, velocity) fitted to tens of observations through the calibrated camera, initialised from the ball's pixel size. Tracks are split at kinks (hits/bounces) wherever one parabola doesn't fit. Then each rally's segments are refit jointly with air drag (a = g − k\|v\|v, k = 0.04 /m) and soft constraints: consecutive segments meet, bounces lie on the floor. Boundaries become bounce events (on the floor, vertical velocity flips) or hit events (credited to the nearest player). |
+| `ball_check` | Physical sanity checks: how well segments join, net-crossing heights, bounce positions, contact heights. |
 | `ball_qa` | Crops around random tracked ball positions, to check precision. |
 | `identity_frames` | Tiles frames with per-tracker boxes at chosen timestamps. This is the check that catches identity swaps. |
 
@@ -175,6 +180,16 @@ players outside the camera's view, which stay `null`.
   interpolated point behind a player's head.
 - **What the untracked frames are:** in sampled frames without a track, the ball was out
   of play (between points, in a hand, or lying still).
+
+**3D ball result (`ball_check`):**
+- 1,091 flight segments, 277 bounces and 440 hits.
+- The ball is in 50% of exported frames.
+- Reprojection error: median 1.3 px.
+- Consecutive segments meet: median gap 10 cm.
+- Contact height: median 0.91 m.
+- Bounces: 90% land within 0.5 m of the court.
+- Net crossings: 92% clear the net. Most of the rest are real: balls rolled under the net
+  between points, or balls into the net.
 
 **Video quirks the pipeline handles:**
 - **A full-screen ad at ~312.5–316.4 s** ("Wear Eye Protection!"). It is detected by

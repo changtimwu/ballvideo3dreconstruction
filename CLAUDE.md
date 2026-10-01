@@ -82,3 +82,13 @@ format. The original spec is in `prompts.md`.
   Don't reject candidates by distance to ankles, because low balls bounce right by
   players' feet. Check precision with `tracking.ball_qa` crops and recall by looking at
   frames with no track.
+- **The 3D ball (`ball3d.py`).** Drag matters for a pickleball: about 40% of g at
+  10 m/s. Fit rallies jointly (continuity + floor constraints); independent segment fits
+  drift in depth by up to a metre at short segments. Use `simulate()` / `simulate_batch()`
+  everywhere the ball is evaluated, so export and checks use the same physics as the fit.
+  The batched Jacobian in `refit_chain` is why the full match takes 2 min rather than
+  hours; don't swap in scipy's default finite differences.
+- **Headless Chrome screenshots of WebGL can come out blank at random** (captured before
+  the first draw). Retry before debugging the viewer. To render arbitrary times, serve a
+  copy of `index.html` + `tracking_data.json` without `match.mp4`: the internal clock can
+  seek, while a server without HTTP Range support can't seek the video.
