@@ -4,4 +4,9 @@
 
 # OS
 .DS_Store
-calib_overlay.jpg
+
+# Tracking pipeline
+.venv/
+data/
+*.pt
+__pycache__/

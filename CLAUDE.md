@@ -8,11 +8,16 @@ format. The original spec is in `prompts.md`.
 - `index.html`: the entire app: one ES-module script, three@0.170.0 and OrbitControls via a
   jsdelivr import map, and Tailwind via CDN. There's no build step and no package.json. Keep
   it single-file.
-- `tools/calibrate_camera.py`: an OpenCV camera solve from the court lines. Run it with
-  `uv run --with opencv-python-headless --with numpy ...`.
+- `tracking/`: the Python pipeline that writes `tracking_data.json` (README §4). It uses
+  `uv` (`pyproject.toml`, Python 3.12) and stages `check_camera → detect → appearance → track → export`,
+  plus `overlay` for QA. Run stages as modules (`uv run python -m tracking.<stage>`).
+  Intermediate artefacts go to `data/` (gitignored). `tracking_data.json` itself is
+  committed, so GitHub Pages serves real data.
+- `tracking/camera.py`: the court model and camera (projection, pixel → floor-plane rays,
+  `line_score` court-visibility test). `tracking/camera.json` is the solved camera.
 - `match.mp4` is gitignored (~365 MB). README §1 has the exact yt-dlp command to fetch it.
-- `tracking_data.json` doesn't exist yet. Without it the viewer uses `generateDemo()`, which
-  makes synthetic rallies in the page.
+- If `tracking_data.json` can't be fetched (e.g. under `file://`), the viewer uses
+  `generateDemo()`, which makes synthetic rallies in the page.
 
 ## Conventions that matter
 
@@ -21,18 +26,19 @@ format. The original spec is in `prompts.md`.
   - `+x` points to the far baseline, `+y` is left as seen from the near baseline, `z` is up.
 - **Convert to three.js only at the render boundary,** with `toV(x, y, z)`, which gives
   `(x, z, -y)`. Don't mix the two spaces.
-- **Player index order** comes from `players[]` in the JSON. Indices 0–1 are the near team
-  and 2–3 the far team (`team` overrides this).
+- **Player index order** comes from `players[]` in the JSON. `team` groups partners; in the
+  real data team 0 is whoever starts on the near side.
 - **The video is the master clock.** `clock.now()` uses `video.currentTime`, refined with
   `requestVideoFrameCallback`. A free-running clock takes over only when the video fails to
   load. Data time = video time − `video_offset`.
 - **All sampling goes through `sampleAt` / `playerXY` / `ballXYZ`.** These lerp over typed
   arrays built by `normalize()`. New data fields should be added to `normalize()`, not read
   from raw JSON in the frame loop.
-- **`CALIBRATED_CAMERA` in `index.html` comes from `tools/calibrate_camera.py`.** Re-run the
-  tool rather than hand-editing it. It is tied to the 1080p60 H.264 encode (yt-dlp formats
-  `299+140`).
-- **UI copy is Traditional Chinese** (zh-Hant). Keep labels as written in `prompts.md`.
+- **`CALIBRATED_CAMERA` in `index.html` mirrors `tracking/camera.json`** (written by
+  `tracking.check_camera`). Re-run that rather than hand-editing. It is tied to the 1080p60
+  H.264 encode (yt-dlp formats `299+140`).
+- **UI copy is Traditional Chinese** (zh-Hant). Keep the UI chrome as written in
+  `prompts.md`. Player legend labels come from the data.
 
 ## Testing
 
@@ -49,3 +55,25 @@ format. The original spec is in `prompts.md`.
   ```
 - **To check `原機位疊合` alignment,** blend that screenshot with the matching video frame
   (`ffmpeg -ss 900 -i match.mp4 -frames:v 1 f.png`). The court lines should coincide.
+- **Pipeline QA:** after changing `track`/`export`, render
+  `uv run python -m tracking.overlay match.mp4 --start 290 --end 320` and look at frames
+  (ffmpeg `select` + `tile`). Identity swaps and foot-placement errors show up immediately;
+  the printed stats don't reveal them.
+
+## Pipeline gotchas
+
+- **The footage has edited-in graphics** (an ad at ~312.5–316.4 s). Anything per-frame must
+  respect `court_score` / `court_ok`.
+- **Teams switch ends mid-match.** Never infer identity or facing direction from the team or
+  side. The viewer faces each figure toward the net from its current half.
+- **Per-frame shirt colour is noisy** (white measured L 123–214, grey 57–148 in one
+  rally). Only use colour aggregated over tracklets. Even then, the near pair (grey vs
+  white) only separates with the multi-region descriptor (`appearance.py`). "Which shirt
+  is brighter" is not ground truth either.
+- **YOLO emits duplicate boxes on one person.** Without `dedupe_and_split`, they shatter
+  tracklets into 1-frame pieces.
+- **The motion linker can swap people mid-tracklet** during crossings, so
+  `split_on_appearance` must run before identity assignment.
+- **Verify identities by eye** with `tracking.identity_frames` (per-tracker boxes) at ~12 timestamps
+  (including after the end switch). The tracker's own statistics looked fine while
+  identities were wrong.

@@ -5,14 +5,15 @@ reconstruction of the court, the players and the ball next to the source video, 
 the video's clock.
 
 - `index.html`: the whole viewer in one file (Three.js and Tailwind come from CDNs).
-- `tools/calibrate_camera.py`: solves the real camera from the court lines in the video.
-  This is what drives the `原機位疊合` view.
+- `tracking/`: the Python pipeline that extracts tracking from the video (§4).
+- `tracking_data.json`: its output, which the viewer loads.
 - `prompts.md`: the original spec.
 
-> **Status:** `tracking_data.json` doesn't exist yet. Until it does, the viewer runs on a
-> **generated demo dataset**. The court, the camera calibration and the video sync are
-> real; the player and ball motion are synthetic. The badge in the top-right corner shows
-> which data is loaded.
+> **Status (milestone 1 of [#1](https://github.com/changtimwu/ballvideo3dreconstruction/issues/1)):**
+> `tracking_data.json` now holds **real player floor positions** for the whole match. The
+> ball isn't tracked yet, and body poses are still procedural. Without
+> `tracking_data.json`, the viewer falls back to a generated demo dataset. The badge in the
+> top-right corner shows which data is loaded.
 
 ## 1. Get the match video (`match.mp4`)
 
@@ -107,28 +108,73 @@ The full schema is in the comment at the top of `index.html`. In short:
 - **Optional `events[]`:** `hit` and `bounce` events. If they're absent, they're
   auto-detected from the ball path.
 - **Optional `camera`:** overrides the built-in calibration.
+- **Player labels and colours** come from `players[]`. The pipeline names players by
+  measured shirt colour (灰衣 / 白衣 / 紅衣 / 藍衣), not 近場 / 遠場, because the teams
+  switch ends mid-match.
 - **`video_offset`:** maps data time to video time (`video_time = t + video_offset`).
 
-## 4. Camera calibration
+## 4. Tracking pipeline (`tracking/`)
 
-The camera in `match.mp4` never moves. `tools/calibrate_camera.py` reads one frame and
-works out the camera's pose and focal length:
-
-1. It fits the near-half court lines to white pixels.
-2. It intersects those lines to get the court corners.
-3. It runs `solvePnP` while sweeping the focal length.
-
-The result reprojects to about 2 px, and the far court and net posts land within about
-12 px.
+Python 3.12 via `uv`; it uses PyTorch on Apple-silicon GPUs (MPS) when available. The
+first `uv sync` downloads ~1 GB.
 
 ```bash
-uv run --with opencv-python-headless --with numpy tools/calibrate_camera.py match.mp4 900
+uv sync
+uv run python -m tracking.check_camera match.mp4      # stage 1: camera check → tracking/camera.json
+uv run python -m tracking.detect match.mp4            # stage 2: YOLO pose, ~40 min for the full video
+uv run python -m tracking.appearance match.mp4        # stage 2b: hair/torso/shorts/elbow colours, ~2 min
+uv run python -m tracking.track                       # stage 3: identities + smoothed floor tracks
+uv run python -m tracking.export                      # → tracking_data.json
+uv run python -m tracking.overlay match.mp4 --start 290 --end 320   # QA video → data/overlay.mp4
 ```
 
-It prints the camera in court coordinates and writes `calib_overlay.jpg` for a visual check.
-Current solution:
+`detect` accepts `--start` / `--end` (seconds) to process a test window. Intermediate
+files go to `data/` (gitignored).
 
-- position `(-8.81, -4.78, 2.20)` m
+| Stage | What it does |
+| --- | --- |
+| `camera.py` / `check_camera` | Fits the near-half court lines, intersects them into corners, and runs `solvePnP` over a focal-length sweep. Re-checks every 30 s. The camera holds still to ~2 px for the whole video. |
+| `detect` | Runs YOLO11-pose on every 2nd frame (~30 fps). Keeps people whose feet project onto this court (±2 m), samples each one's shirt colour, and scores whether the court is visible in the frame. |
+| `appearance` | Samples the median colour of keypoint-anchored regions per detection: hair, torso, shorts and each elbow. Needed because the near pair wear near-identical light shirts. |
+| `track` | See below. |
+| `export` | Pairs players into teams (the pair that shares a half), names them by shirt colour, and writes the viewer JSON. Long gaps stay `null`, and the viewer hides the player there. |
+| `overlay` | Draws the exported positions back onto the video, to check alignment and identities. |
+| `identity_frames` | Tiles frames with per-tracker boxes at chosen timestamps. This is the check that catches identity swaps. |
+
+**How `track` assigns identities:**
+1. Drop duplicate boxes on one person, and set aside people standing within 0.7 m of
+   someone else.
+2. Link the rest into tracklets by floor-position continuity, and merge unambiguous
+   continuations.
+3. **Teams by court side:** the red player's shirt is unmistakable, so his half over time
+   tells every tracklet which team it belongs to. Partners share a half, and the ends
+   switch only once.
+4. **Split tracklets** where the person's appearance flips. The motion linker sometimes
+   swaps two players during a crossing.
+5. **Who's who within a team** comes from the multi-region appearance. Tracklets that
+   overlap in time must be different people, which makes it a two-colouring problem; each
+   connected group is oriented by its length-weighted evidence.
+6. Fill the set-aside crowded detections back in, place feet (ankles, or hips at each
+   player's measured hip height when feet are cut off), reject outliers, fill short gaps,
+   and smooth at 2.5 Hz.
+
+Checked by eye at 12 timestamps across the match: identities are correct in all of them,
+including after the end switch. 61% of frames have all four players. The rest are mostly
+players outside the camera's view, which stay `null`.
+
+**Video quirks the pipeline handles:**
+- **A full-screen ad at ~312.5–316.4 s** ("Wear Eye Protection!"). It is detected by
+  checking whether the court lines are where the camera says they should be. Players are
+  `null` there.
+- **The teams switch ends between 7:30 and 10:20.** Identity comes from shirt colour, not
+  court side.
+- **Near players often step out of the bottom/left edge of the frame.** These become gaps.
+
+### Camera
+
+Current solution, used as `CALIBRATED_CAMERA` in `index.html` and stored in
+`tracking/camera.json`:
+
+- position `(-8.81, -4.78, 2.19)` m
 - vertical FOV `41.4°`
-
-These numbers are hard-coded as `CALIBRATED_CAMERA` in `index.html`.
+- about 2 px reprojection error; the far court and net posts land within ~12 px.

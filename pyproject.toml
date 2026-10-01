@@ -1,0 +1,16 @@
+[project]
+name = "ballvideo3d-tracking"
+version = "0.1.0"
+description = "Extract player and ball tracking from match.mp4 for the 3D viewer"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "numpy",
+    "scipy",
+    "opencv-python-headless",
+    "torch",
+    "ultralytics>=8.3",
+    "lap",
+]
+
+[tool.uv]
+package = false

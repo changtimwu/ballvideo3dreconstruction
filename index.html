@@ -193,7 +193,7 @@ const NET = { halfSpan: 3.35, hPost: 0.9144, hCenter: 0.8636, depth: 0.76 };
 const VIDEO_FPS = 60000 / 1001;
 const G = 9.81;
 
-// Camera solved from the court lines in match.mp4 (see tools/calibrate_camera.py).
+// Camera solved from the court lines in match.mp4 (tracking/camera.json, via tracking.check_camera).
 const CALIBRATED_CAMERA = {
   position: [-8.8158, -4.7755, 2.1949], look_at: [-3.8801, -0.6206, 0], vfov_deg: 41.375, aspect: 16 / 9,
 };
@@ -462,7 +462,7 @@ function normalize(json) {
 
   const cam = json.camera ?? CALIBRATED_CAMERA;
   return {
-    n, np, T, P, B, BV, K, dist, meta, rallies, events,
+    n, np, T, P, B, BV, K, dist, meta, rallies, events, known,
     hits: events.filter(e => e.type === 'hit'),
     bounces: events.filter(e => e.type === 'bounce'),
     offset: +json.video_offset || 0,
@@ -513,6 +513,11 @@ function playerXY(D, p, t, out) {
   const a = (i * D.np + p) * 2, b = ((i + 1) * D.np + p) * 2;
   out[0] = D.P[a] + (D.P[b] - D.P[a]) * u; out[1] = D.P[a + 1] + (D.P[b + 1] - D.P[a + 1]) * u;
   return out;
+}
+// False when the nearest sample for this player was missing in the source data.
+function playerKnown(D, p, t) {
+  const { i, u } = sampleAt(D, t);
+  return D.known[(u < 0.5 ? i : i + 1) * D.np + p] === 1;
 }
 function playerDist(D, p, t) {
   const { i, u } = sampleAt(D, t);
@@ -794,8 +799,8 @@ function proceduralPose(D, p, t, out, frameDt) {
   const bx = playerXY(D, p, t + 0.06, [0, 0]);
   const vx = (bx[0] - tmpB[0]) / 0.12, vy = (bx[1] - tmpB[1]) / 0.12;
   const speed = Math.hypot(vx, vy);
-  const team = D.meta[p].team ?? (p < 2 ? 0 : 1);
-  const netDir = team === 0 ? 0 : Math.PI;
+  // Face the net from whichever half the player is on — teams switch ends mid-match.
+  const netDir = x < 0 ? 0 : Math.PI;
 
   // Heading: face the net, turn toward the ball, clamped to ±75°.
   let want = netDir;
@@ -1320,6 +1325,10 @@ function frame(wall) {
     readout.textContent = `${vt.toFixed(2)}s · #${Math.max(0, fi)}`;
 
     for (let p = 0; p < actors.length; p++) {
+      const shown = playerKnown(D, p, t);
+      actors[p].man.group.visible = shown;
+      actors[p].trail.mesh.visible = trailsOn && shown;
+      if (!shown) continue;
       const [x, y] = playerXY(D, p, t, tmpA);
       let pose;
       if (D.K) {
