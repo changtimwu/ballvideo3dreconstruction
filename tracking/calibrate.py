@@ -44,7 +44,7 @@ def median_background(cap: cv2.VideoCapture, n: int = 31) -> np.ndarray:
     return np.median(np.stack(frames), axis=0).astype(np.uint8)
 
 
-def detect_lines(mask: np.ndarray, max_lines: int = 16):
+def detect_lines(mask: np.ndarray, max_lines: int = 24):
     """Hough segments merged into infinite lines. Returns [(theta, rho, length)]."""
     H, W = mask.shape
     segs = cv2.HoughLinesP(mask * 255, 1, np.pi / 720, threshold=60,
@@ -96,25 +96,26 @@ def model_samples(per_line: int = PER_LINE, side: float = 0.2):
     return np.vstack(c), np.vstack(l), np.vstack(r)
 
 
-def auto_homography(mask: np.ndarray):
-    """Best floor homography (court x, y → pixels) by exhaustive line-pair hypotheses."""
+def auto_homography(mask: np.ndarray, keep: int = 10):
+    """Best floor homographies (court x, y → pixels) by exhaustive line-pair hypotheses.
+    Returns the `keep` best as [(score, H)], best first."""
     H_img, W_img = mask.shape
     lines = detect_lines(mask)
     if len(lines) < 4:
-        return None, 0.0
+        return []
     ang = np.array([l[0] for l in lines])
     # two direction families: k-means on the doubled angle
     v = np.c_[np.cos(2 * ang), np.sin(2 * ang)].astype(np.float32)
     _, lab, _ = cv2.kmeans(v, 2, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 1e-3), 5,
                            cv2.KMEANS_PP_CENTERS)
-    fam = [[l for l, k in zip(lines, lab.ravel()) if k == c][:8] for c in (0, 1)]
+    fam = [[l for l, k in zip(lines, lab.ravel()) if k == c][:12] for c in (0, 1)]
     if min(len(f) for f in fam) < 2:
-        return None, 0.0
+        return []
     dil = cv2.dilate(mask, np.ones((7, 7), np.uint8))
     centre, left, right = model_samples()
     hom = lambda q: np.c_[q, np.ones(len(q))]
     src_c, src_l, src_r = hom(centre), hom(left), hom(right)
-    best = (None, 0.0)
+    best: list[tuple[float, np.ndarray]] = []
     x_pairs = list(itertools.permutations(X_LEVELS, 2))
     y_pairs = list(itertools.permutations(Y_LEVELS, 2))
     for fa, fb in ((0, 1), (1, 0)):            # which family holds the x = const lines
@@ -162,9 +163,11 @@ def auto_homography(mask: np.ndarray):
                 convex = (cz > 0).all(1) & ((cross > 0).all(1) | (cross < 0).all(1))
                 area = 0.5 * np.abs((cxy[..., 0] * np.roll(cxy[..., 1], -1, 1) - np.roll(cxy[..., 0], -1, 1) * cxy[..., 1]).sum(1))
                 score = np.where(convex & (area > 0.03 * W_img * H_img), score, 0)
-                k = int(np.argmax(score))
-                if score[k] > best[1]:
-                    best = (Hs[k], float(score[k]))
+                for k in np.argsort(-score)[:3]:
+                    if score[k] > 0 and (len(best) < keep or score[k] > best[-1][0]):
+                        best.append((float(score[k]), Hs[k]))
+                        best.sort(key=lambda b: -b[0])
+                        del best[keep:]
     return best
 
 
@@ -197,20 +200,27 @@ def validate(img: np.ndarray, cam: Camera) -> float:
 
 
 def auto_calibrate(bg: np.ndarray):
+    """Try the best homography hypotheses in turn; the first that yields a camera above
+    the floor and validates wins. (The top-scoring one can be a mirrored or mislabelled
+    court that no real camera produces.)"""
     mask = white_mask(bg)
-    Hm, score = auto_homography(mask)
-    if Hm is None:
+    hyps = auto_homography(mask)
+    if not hyps:
         return None, "no court lines found"
-    try:
-        cam = orient_near(camera_from_homography(Hm, (bg.shape[1], bg.shape[0])))
-        cam, err, used = refine(bg, cam)
-        cam = orient_near(cam)
-    except ValueError as e:
-        return None, str(e)
-    s = validate(bg, cam)
-    if s < OK_SCORE or err > OK_ERR:
-        return None, f"best fit didn't validate (line score {s:.2f}, error {err:.1f} px)"
-    return cam, f"auto: {used} points, error {err:.2f} px, line score {s:.2f}"
+    last = "no hypothesis gave a camera"
+    for rank, (_, Hm) in enumerate(hyps):
+        try:
+            cam = orient_near(camera_from_homography(Hm, (bg.shape[1], bg.shape[0])))
+            cam, err, used = refine(bg, cam)
+            cam = orient_near(cam)
+        except ValueError as e:
+            last = str(e)
+            continue
+        s = validate(bg, cam)
+        if s >= OK_SCORE and err <= OK_ERR:
+            return cam, f"auto: {used} points, error {err:.2f} px, line score {s:.2f} (hypothesis {rank + 1}/{len(hyps)})"
+        last = f"best fit didn't validate (line score {s:.2f}, error {err:.1f} px)"
+    return None, last
 
 
 def click_calibrate(bg: np.ndarray) -> Camera:

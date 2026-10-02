@@ -1,0 +1,13 @@
+{
+ "about": "Hand-labelled videos for tuning scout thresholds: `python -m tracking scout --seed-check`. Add any video a human has judged, with a short note.",
+ "videos": {
+  "cRRLvhKbPXM": {"label": "pass", "note": "reference video; fixed tripod behind the near baseline, analysed"},
+  "Nn6ylN94Yq4": {"label": "pass", "note": "same channel, fixed camera in a dark venue; near player often fills the frame (checked contact sheet)"},
+  "tNjju19sb28": {"label": "pass", "note": "same channel, fixed camera (checked contact sheet)"},
+  "3sC53GlvW_s": {"label": "reject", "note": "PPA broadcast: close-ups, video challenge, interviews (checked contact sheet)"},
+  "kO6ZG66S1a0": {"label": "reject", "note": "PPA broadcast: steady main view but cut-aways and score graphics (checked contact sheet)"},
+  "68geZh5crzw": {"label": "reject", "note": "PPA broadcast"},
+  "Ut_7xCk8vPE": {"label": "reject", "note": "PPA broadcast"},
+  "eN2i2Ub0eWw": {"label": "reject", "note": "PPA broadcast"}
+ }
+}

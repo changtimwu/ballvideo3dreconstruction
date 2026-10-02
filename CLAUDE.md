@@ -26,6 +26,10 @@ Pickleball doubles 3D reconstruction from YouTube videos. See README.md for setu
   - QA tools: `overlay`, `identity_frames`, `ball_qa`, `ball_check`.
   - Every camera-dependent stage takes a required `--camera`, so there is no global
     camera.
+- **`tracking/scout.py`** (`python -m tracking scout`) finds and screens candidate videos
+  (README §2b). Its registry `scout/candidates.json` and hand labels `scout/seed.json` are
+  committed; downloads go to `work/scout/<id>/`. Measuring and scoring are separate, so
+  change thresholds and use `--rescore` / `--seed-check` rather than re-screening.
 - **`tracking/camera.py`** holds the court model (`MODEL_LINES`, `MODEL_POINTS`; sidelines
   split at the net), the `Camera` class, `solve_pnp`, `refine` (snap the model to painted
   lines) and `line_score` (is the court visible).
@@ -116,3 +120,24 @@ Pickleball doubles 3D reconstruction from YouTube videos. See README.md for setu
   everywhere the ball is evaluated, so export and checks use the same physics as the fit.
   The batched Jacobian in `refit_chain` is why the full match takes 2 min rather than
   hours; don't swap in scipy's default finite differences.
+- **YouTube media access.**
+  - **No random access deep into streams.** Signed stream URLs reject ffmpeg (403) and
+    HTTP range reads beyond the first ~10–30 MB. HLS isn't offered to the clients
+    yt-dlp can use. So "a few full-res frames without downloading" isn't possible;
+    `scout` downloads a 480p copy instead.
+  - **Bursts get rate-limited.** After a burst of downloads, YouTube refused all media
+    (403 / connection cut after ~1 KB) for hours, with the latest yt-dlp too.
+    Storyboards (`i.ytimg.com`) and metadata kept working. Treat media failures as
+    retryable (`incomplete`), and don't hammer YouTube.
+- **Auto-calibration on noisy medians** (few frames, 480p).
+  - Clutter lines can crowd the court's lines out, hence 12 lines per direction family.
+  - The top-scoring homography can be a mirrored court, so `auto_calibrate` tries the 10
+    best in turn.
+  - `solvePnP` ITERATIVE throws on degenerate point sets; fall back to IPPE, but don't
+    make IPPE the default (its planar ambiguity picked wrong poses in the focal sweep).
+- **Audio "music" detection.** Harmonic–percussive separation counts steady hall noise as
+  harmonic and failed a synthetic-music sanity test. Sustained narrow spectral peaks
+  work: the reference video scores 3%, and a chord bed at −6 dB scores 47%. Paddle-pop
+  detection only matched ~20% of tracked hits on the reference video, so it's reported,
+  not scored.
+

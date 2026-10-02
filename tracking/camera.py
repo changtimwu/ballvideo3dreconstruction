@@ -114,7 +114,14 @@ def solve_pnp(img_pts: np.ndarray, court_xy: np.ndarray, size: tuple[int, int]) 
     best = None
     for f in np.geomspace(0.35, 4.0, 160) * W:
         K = np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1]])
-        ok, r, t = cv2.solvePnP(obj, img_pts, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
+        try:
+            ok, r, t = cv2.solvePnP(obj, img_pts, K, None, flags=cv2.SOLVEPNP_ITERATIVE)
+        except cv2.error:
+            # degenerate layouts make the iterative solver bail out; IPPE (planar, 4+ points) copes
+            try:
+                ok, r, t = cv2.solvePnP(obj, img_pts, K, None, flags=cv2.SOLVEPNP_IPPE)
+            except cv2.error:
+                continue
         if not ok:
             continue
         cam = Camera(K, r, t, (W, H))
@@ -247,6 +254,8 @@ def line_score(img: np.ndarray, cam: Camera, n: int = 400) -> float:
         px = px[(px[:, 0] > 2) & (px[:, 0] < Wd - 3) & (px[:, 1] > 2) & (px[:, 1] < H - 3)]
         line_score._pts, line_score._key = np.round(px).astype(int), (id(cam), img.shape)
     px = line_score._pts
+    if len(px) == 0:
+        return 0.0
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     white = ((hsv[..., 1] < 70) & (hsv[..., 2] > 160)).astype(np.uint8)
     white = cv2.dilate(white, np.ones((5, 5), np.uint8))

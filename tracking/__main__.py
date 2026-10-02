@@ -1,6 +1,7 @@
 """Analyse a YouTube pickleball video end to end and publish its tracking data.
 
   uv run python -m tracking analyze <youtube-url> [--no-push] [--no-commit] [--force] [--no-gui]
+  uv run python -m tracking scout …     (find and screen candidate videos; see tracking/scout.py)
 
 1. downloads the video with yt-dlp into work/<id>/ (gitignored),
 2. runs the pipeline stages, skipping any whose output already exists (so an
@@ -134,7 +135,11 @@ def analyze(a) -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="python -m tracking")
+    if len(sys.argv) > 1 and sys.argv[1] == "scout":       # find + screen candidate videos
+        from .scout import main as scout_main
+        return scout_main(sys.argv[2:])
+    ap = argparse.ArgumentParser(prog="python -m tracking",
+                                 epilog="also: python -m tracking scout --help  (find and screen videos)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("analyze", help="analyse a YouTube video and publish its tracking data")
     p.add_argument("url")

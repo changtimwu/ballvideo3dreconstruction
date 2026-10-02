@@ -82,6 +82,47 @@ painted lines of the median frame. The players have averaged away.*
 - **Doubles** (4 players).
 - A **yellow/green ball.**
 
+## 2b. Find more videos (`scout`)
+
+Deciding by eye whether a video fits the pipeline is slow. `scout` screens candidates
+automatically and keeps a ranked list, so a human only confirms the top ones:
+
+```bash
+uv run python -m tracking scout --channel "https://www.youtube.com/@ThePickleballPirates/videos" --limit 30
+uv run python -m tracking scout --search "pickleball 4.5 doubles full game" --limit 30
+uv run python -m tracking scout --report          # ranked list in the terminal
+uv run python -m tracking scout --review          # local page: contact sheets + accept / reject
+uv run python -m tracking scout --analyze-top 3   # analyse the best accepted videos (+ --include-auto)
+```
+
+Each video goes through the stages, cheapest first, and stops at the first failed gate:
+
+| Stage | Cost | Measures |
+| --- | --- | --- |
+| Metadata | ~1 s | public, embeddable, not live, 5–60 min, ≥ 720p |
+| Storyboard | ~3 s, ~1 MB | YouTube's 320×180 preview frames every ~10 s, compared with the median view (ORB homography, plus an unchanged-pixel fallback for dark or occluded frames): share of time on the fixed view, cuts per minute, graphics and caption share |
+| Frames | ~60 MB | 24 frames from a 480p copy: does `tracking.calibrate` find the court, how many players stand on it, how often is the court visible |
+| Audio | ~15 MB | share of time with music (sustained spectral peaks); paddle-pop rate (reported only) |
+
+**Where results go:**
+- **Registry:** every result goes to `scout/candidates.json` (committed): measurements,
+  gates, score, and the automatic and human decisions. Videos are never screened twice.
+- **Re-scoring:** `--rescore` re-applies the thresholds to the stored measurements
+  without re-downloading.
+- **Seed set:** `--seed-check` compares the thresholds with the hand labels in
+  `scout/seed.json`.
+
+**First results:**
+- **Pro-tour broadcasts:** all 10 rejected. They spend 43–69% of the time on the main
+  view, cut 1.2–4 times a minute, or run over an hour.
+- **The reference channel's games:** all pass the storyboard stage, at 95–100% fixed
+  view and almost no cuts.
+- **The reference video, end to end:** scores 94/100 (auto-pass).
+
+**If YouTube refuses media downloads** (`HTTP Error 403`), which happens after bursts of
+requests, the affected videos are marked `incomplete`. `--retry-incomplete` resumes
+them later. Storyboards and metadata keep working.
+
 ## 3. The site
 
 - **`index.html`** lists the analysed videos.
