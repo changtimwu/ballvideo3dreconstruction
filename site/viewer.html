@@ -866,7 +866,11 @@ const clock = {
   seek(t) {
     t = THREE.MathUtils.clamp(t, 0, this.duration || 0);
     this.est = t; this.wall = performance.now();
-    this.player?.seekTo(t, true);
+    if (!this.player) return;
+    const wasPlaying = this.playing;
+    this.player.seekTo(t, true);
+    // seekTo() on a video that hasn't started also starts it; keep a paused video paused
+    if (!wasPlaying) this.player.pauseVideo();
   },
   setRate(r) { this.rate = r; this.player?.setPlaybackRate(r); },
 };

@@ -51,7 +51,9 @@ function card(v) {
   return `
   <article class="card flex flex-col">
     <a href="viewer.html?v=${encodeURIComponent(v.id)}" class="block relative aspect-video bg-black" aria-label="開啟 ${esc(v.title)} 的 3D 重建">
-      <img src="https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/hqdefault.jpg" alt="" loading="lazy" class="w-full h-full object-cover opacity-90" />
+      <img src="https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/maxresdefault.jpg" alt="" loading="lazy"
+           onerror="this.onerror=null; this.src='https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/mqdefault.jpg'"
+           class="w-full h-full object-cover opacity-90" />
       <span class="absolute right-2 bottom-2 mono text-xs px-1.5 py-0.5 rounded" style="background: rgba(0,0,0,.75)">${dur(v.duration)}</span>
     </a>
     <div class="p-4 flex flex-col gap-3 flex-1">

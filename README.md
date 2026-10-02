@@ -6,6 +6,8 @@ original video.
 
 **Site:** https://changtimwu.github.io/ballvideo3dreconstruction/
 
+![The viewer: the 3D reconstruction (left) next to the original YouTube video (right), at the same moment](docs/images/viewer.jpg)
+
 ## How it fits together
 
 ```
@@ -69,6 +71,11 @@ frame. If that doesn't validate, a window opens on that frame: click the named c
 points it asks for (`s` skips a point that isn't visible, `u` undoes, Enter finishes once
 4 or more are picked).
 
+![Automatic calibration: the court model (red) drawn on the median "empty court" frame](docs/images/calibration.jpg)
+
+*Automatic calibration on the reference video: the court model, in red, snapped onto the
+painted lines of the median frame. The players have averaged away.*
+
 **What footage works:**
 - A **fixed camera** that sees the court, typically from behind a baseline. Videos with
   camera cuts or panning aren't supported; the calibration's drift check warns about them.
@@ -81,9 +88,19 @@ points it asks for (`s` skips a point that isn't visible, `u` undoes, Enter fini
 - **`viewer.html?v=<id>`** plays one video: the 3D reconstruction next to the YouTube
   player.
 
+<img src="docs/images/gallery.jpg" alt="The video list: one card per analysed video, with tracking stats and links to the 3D view, YouTube and the JSON" width="640">
+
 The transport bar drives the YouTube player (play/pause, seek, frame step, ¼×/½×/1×),
 and the 3D scene follows the player's clock. 對照影片 shrinks the video to a mini player:
 YouTube players have to stay at least 200×200 px to keep playing.
+
+**Camera presets.** 原機位疊合 uses the calibrated camera, so the 3D court lines up with the
+real footage (here with the video collapsed to the mini player). 側面 and 俯視 show the ball's
+arc over the net and the players' recent footwork (軌跡).
+
+| 原機位疊合 (camera-matched) | 側面 (side) | 俯視 (top-down) |
+| --- | --- | --- |
+| ![Camera-matched view](docs/images/view-broadcast.jpg) | ![Side view](docs/images/view-side.jpg) | ![Top-down view](docs/images/view-top.jpg) |
 
 **Local preview** (no Range-capable server needed, since the video comes from YouTube):
 
@@ -165,9 +182,19 @@ module you can run on its own (`uv run python -m tracking.<stage> --help`).
    player's measured hip height when feet are cut off), reject outliers, fill short gaps,
    and smooth at 2.5 Hz.
 
+![Identity check: per-tracker boxes T0–T3 at six timestamps, including after the teams switch ends](docs/images/identity-check.jpg)
+
+*`tracking.identity_frames`: each tracker identity (T0–T3) has to stay on the same person.
+The bottom row is after the teams switch ends.*
+
 Checked by eye at 12 timestamps across the match: identities are correct in all of them,
 including after the end switch. 61% of frames have all four players. The rest are mostly
 players outside the camera's view, which stay `null`.
+
+![Random crops around tracked ball positions; red ring = detected, magenta = interpolated](docs/images/ball-crops.jpg)
+
+*`tracking.ball_qa`: random crops around tracked ball positions. A red ring means
+detected, magenta means interpolated across a short occlusion.*
 
 **2D ball result:**
 - **Coverage:** the ball is tracked in 58% of all frames, 54% directly observed and the
